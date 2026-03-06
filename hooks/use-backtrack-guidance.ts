@@ -19,7 +19,7 @@ export function useBacktrackGuidance({
   setIsPanicActive,
 }: BacktrackGuidanceOptions) {
 
-  // --- Continuous heading guidance every 4 seconds ---
+  // --- Continuous heading guidance every 8 seconds ---
   const lastGuidanceRef = useRef(0)
   useEffect(() => {
     if (!backtrackState.isBacktracking || !backtrackState.currentSegment) return
@@ -27,7 +27,7 @@ export function useBacktrackGuidance({
     const interval = setInterval(() => {
       if (!backtrackState.currentSegment) return
       const now = Date.now()
-      if (now - lastGuidanceRef.current < 3500) return
+      if (now - lastGuidanceRef.current < 7500) return
       lastGuidanceRef.current = now
 
       const { instruction, aligned } = getTurnInstruction(
@@ -39,7 +39,7 @@ export function useBacktrackGuidance({
       } else {
         speak(`${instruction}. Then walk ${backtrackState.stepsRemaining} steps.`, "assertive")
       }
-    }, 4000)
+    }, 8000)
 
     return () => clearInterval(interval)
   }, [

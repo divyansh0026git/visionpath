@@ -17,6 +17,10 @@ export function useVoiceEngine({ onCommand, continuous = true }: VoiceEngineOpti
   // Ref to track the latest isListening state inside async closures (avoids stale closure bug)
   const isListeningRef = useRef(false)
   const isSpeakingRef = useRef(false)
+  const pendingUtteranceRef = useRef<SpeechSynthesisUtterance | null>(null)
+  const useFallbackTTSRef = useRef(false)
+  const fallbackAudioRef = useRef<HTMLAudioElement | null>(null)
+  const speakViaServerRef = useRef<((text: string, rate: number) => void) | null>(null)
 
   // Ref to always have the latest onCommand callback (fixes stale closure in onresult)
   const onCommandRef = useRef(onCommand)
@@ -27,9 +31,60 @@ export function useVoiceEngine({ onCommand, continuous = true }: VoiceEngineOpti
     isListeningRef.current = isListening
   }, [isListening])
 
+  // ---- TTS voice warmup ----
+  // Chrome/Linux loads voices asynchronously. speechSynthesis.speak() silently fails
+  // if called before voices are loaded. Queue critical messages until ready.
+  useEffect(() => {
+    if (typeof window === 'undefined' || !window.speechSynthesis) {
+      console.warn('[VOICE] speechSynthesis API not available in this browser')
+      return
+    }
+
+    const handleVoicesReady = () => {
+      const voices = window.speechSynthesis.getVoices()
+      if (voices.length > 0) {
+        console.log(`[VOICE] TTS ready — ${voices.length} voice(s) available`)
+        // Play any queued utterance that was waiting for voices to load
+        if (pendingUtteranceRef.current) {
+          const utterance = pendingUtteranceRef.current
+          pendingUtteranceRef.current = null
+          window.speechSynthesis.speak(utterance)
+        }
+      }
+    }
+
+    // Trigger voice loading and check immediately (Firefox loads synchronously)
+    window.speechSynthesis.getVoices()
+    handleVoicesReady()
+
+    window.speechSynthesis.addEventListener('voiceschanged', handleVoicesReady)
+
+    // If voices never load, switch to server-side TTS fallback
+    const warnTimer = setTimeout(() => {
+      if (window.speechSynthesis.getVoices().length === 0) {
+        console.warn('[VOICE] No browser TTS voices after 5s — switching to server-side TTS fallback')
+        useFallbackTTSRef.current = true
+        // Play any queued message via fallback
+        if (pendingUtteranceRef.current) {
+          const pendingText = pendingUtteranceRef.current.text
+          const pendingRate = pendingUtteranceRef.current.rate ?? 1
+          pendingUtteranceRef.current = null
+          speakViaServerRef.current?.(pendingText, pendingRate)
+        }
+      }
+    }, 5000)
+
+    return () => {
+      window.speechSynthesis.removeEventListener('voiceschanged', handleVoicesReady)
+      clearTimeout(warnTimer)
+    }
+  }, [])
+
+  // ---- Speech Recognition setup ----
   useEffect(() => {
     const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition
     if (SpeechRecognition) {
+      console.log('[VOICE] SpeechRecognition API available')
       setIsSupported(true)
       const recognition = new SpeechRecognition()
       recognition.continuous = continuous
@@ -58,10 +113,19 @@ export function useVoiceEngine({ onCommand, continuous = true }: VoiceEngineOpti
       }
 
       recognition.onerror = (event: SpeechRecognitionErrorEvent) => {
+        console.warn('[VOICE] Recognition error:', event.error)
         // On "no-speech" or "audio-capture" errors, try to restart rather than stopping
         if (event.error === "no-speech" || event.error === "audio-capture") {
           // Will be restarted by onend
           return
+        }
+        // Network errors are often transient — allow onend to auto-restart
+        if (event.error === "network") {
+          console.warn('[VOICE] Network error — will retry. If persistent, restart the browser.')
+          return
+        }
+        if (event.error === "not-allowed") {
+          console.error('[VOICE] Microphone permission denied. Grant access in browser settings.')
         }
         setIsListening(false)
         isListeningRef.current = false
@@ -82,6 +146,8 @@ export function useVoiceEngine({ onCommand, continuous = true }: VoiceEngineOpti
       }
 
       recognitionRef.current = recognition
+    } else {
+      console.warn('[VOICE] SpeechRecognition not supported. Use Chrome/Chromium for voice commands.')
     }
 
     return () => {
@@ -92,13 +158,20 @@ export function useVoiceEngine({ onCommand, continuous = true }: VoiceEngineOpti
   }, [continuous])
 
   const startListening = useCallback(() => {
-    if (recognitionRef.current && !isListeningRef.current) {
-      try {
-        recognitionRef.current.start()
-        setIsListening(true)
-        isListeningRef.current = true
-      } catch {
-        // Already started
+    if (!recognitionRef.current) {
+      console.warn('[VOICE] Cannot start — SpeechRecognition not supported. Use Chrome/Chromium.')
+      return
+    }
+    if (isListeningRef.current) return
+    try {
+      recognitionRef.current.start()
+      setIsListening(true)
+      isListeningRef.current = true
+      console.log('[VOICE] Mic listening started')
+    } catch (e: any) {
+      // InvalidStateError = already started (harmless). Any other error is real.
+      if (e?.name !== 'InvalidStateError') {
+        console.error('[VOICE] Failed to start recognition:', e)
       }
     }
   }, [])
@@ -112,10 +185,71 @@ export function useVoiceEngine({ onCommand, continuous = true }: VoiceEngineOpti
   }, [])
 
   const speakTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const lastSpeakTimeRef = useRef(0)
+
+  // Server-side TTS fallback via /api/speak (espeak-ng)
+  const speakViaServer = useCallback(async (text: string, rate: number) => {
+    try {
+      isSpeakingRef.current = true
+      console.log('[VOICE] Server TTS:', text.substring(0, 50))
+      const res = await fetch('/api/speak', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ text, rate }),
+      })
+      if (!res.ok) throw new Error(`Server TTS failed: ${res.status}`)
+      const blob = await res.blob()
+      const url = URL.createObjectURL(blob)
+      const audio = new Audio(url)
+      fallbackAudioRef.current = audio
+      audio.onended = () => {
+        URL.revokeObjectURL(url)
+        fallbackAudioRef.current = null
+        setTimeout(() => { isSpeakingRef.current = false }, 500)
+      }
+      audio.onerror = () => {
+        URL.revokeObjectURL(url)
+        fallbackAudioRef.current = null
+        isSpeakingRef.current = false
+      }
+      await audio.play()
+    } catch (e) {
+      console.error('[VOICE] Server TTS error:', e)
+      isSpeakingRef.current = false
+    }
+  }, [])
+  speakViaServerRef.current = speakViaServer
 
   const speak = useCallback((text: string, priority: "polite" | "assertive" = "polite") => {
-    window.speechSynthesis.cancel()
+    if (typeof window === 'undefined') return
+
+    const now = Date.now()
+
+    // For polite speech: skip entirely if already speaking or spoke recently (6s cooldown)
+    if (priority === "polite") {
+      if (isSpeakingRef.current) return
+      if (now - lastSpeakTimeRef.current < 6000) return
+    }
+
+    // Assertive speech cancels current speech
+    if (priority === "assertive") {
+      if (fallbackAudioRef.current) {
+        fallbackAudioRef.current.pause()
+        fallbackAudioRef.current = null
+      }
+      if (window.speechSynthesis) window.speechSynthesis.cancel()
+    }
+
     if (speakTimeoutRef.current) clearTimeout(speakTimeoutRef.current)
+    lastSpeakTimeRef.current = now
+
+    // Use server-side fallback when browser has no voices
+    if (useFallbackTTSRef.current || !window.speechSynthesis) {
+      const rate = priority === "assertive" ? 1.1 : 0.95
+      speakViaServer(text, rate)
+      return
+    }
+
     const utterance = new SpeechSynthesisUtterance(text)
 
     // Block the microphone from processing this utterance
@@ -131,7 +265,9 @@ export function useVoiceEngine({ onCommand, continuous = true }: VoiceEngineOpti
       }, 500)
     }
     utterance.onend = resetSpeaking
-    utterance.onerror = () => {
+    utterance.onerror = (e) => {
+      // "interrupted" fires when cancel() is called — keep isSpeaking true for the replacement utterance
+      if (e.error === 'interrupted') return
       isSpeakingRef.current = false
     }
 
@@ -148,8 +284,17 @@ export function useVoiceEngine({ onCommand, continuous = true }: VoiceEngineOpti
     utterance.rate = priority === "assertive" ? 1.1 : 0.95
     utterance.pitch = 1
     utterance.volume = 1
+
+    // If voices haven't loaded yet, use server fallback
+    if (window.speechSynthesis.getVoices().length === 0) {
+      console.log('[VOICE] No browser voices — using server TTS for:', text.substring(0, 50))
+      useFallbackTTSRef.current = true
+      speakViaServer(text, utterance.rate)
+      return
+    }
+
     window.speechSynthesis.speak(utterance)
-  }, [])
+  }, [speakViaServer])
 
   return {
     isListening,

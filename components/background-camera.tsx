@@ -157,18 +157,23 @@ const BackgroundCameraInner = forwardRef<BackgroundCameraHandle, BackgroundCamer
             const sortedGroups = Object.values(groups).sort((a, b) => a.closestSteps - b.closestSteps)
             const hazards = ['car', 'truck', 'bus', 'motorcycle', 'wall']
 
+            // Collect messages — speak ONCE with all objects batched together
+            const parts: string[] = []
+            let hasHazard = false
+
             sortedGroups.forEach((group) => {
                 const { count, closestSteps, latestObj } = group
                 const objClass = latestObj.class
                 const isHazard = hazards.includes(objClass)
                 const lastSpoken = lastSpokenRef.current[objClass] || 0
 
-                let cooldownMs = 12000;
+                // Cooldowns: longer gaps to avoid spam
+                let cooldownMs = 20000;
                 if (isHazard) {
                     if (objClass === 'wall') {
-                        cooldownMs = closestSteps < 5 ? 3000 : 10000;
+                        cooldownMs = closestSteps < 5 ? 8000 : 15000;
                     } else {
-                        cooldownMs = closestSteps < 15 ? 4000 : 8000;
+                        cooldownMs = closestSteps < 15 ? 10000 : 15000;
                     }
                 }
 
@@ -180,10 +185,16 @@ const BackgroundCameraInner = forwardRef<BackgroundCameraHandle, BackgroundCamer
                     if (latestObj.position === "left") positionStr = "on your left";
                     if (latestObj.position === "right") positionStr = "on your right";
 
-                    speak(`${hazardPrefix}${countStr} ${positionStr}, ${distanceStr}`, isHazard ? "assertive" : "polite")
+                    parts.push(`${hazardPrefix}${countStr} ${positionStr}, ${distanceStr}`)
+                    if (isHazard) hasHazard = true
                     lastSpokenRef.current[objClass] = now
                 }
             })
+
+            // Single speak call with all detected objects
+            if (parts.length > 0) {
+                speak(parts.join(". ") + ".", hasHazard ? "assertive" : "polite")
+            }
         },
     })
 
