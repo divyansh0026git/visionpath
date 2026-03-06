@@ -185,10 +185,46 @@ export function useCommandHandler(
         speak("Navigation started. Continuous scanning is active. Follow audio guidance.", "assertive")
         setStatusMessage("Navigating and scanning environment")
 
-      // 11. Help (lowest priority — catches remaining "help" not captured above)
+      // 11. Face registration — "add name John" or "remember John"
+      } else if (hasPhrase("add name") || hasPhrase("remember face") || hasPhrase("remember name")) {
+        const nameMatch = cmd.match(/(?:add name|remember face|remember name)\s+(.+)/)
+        if (nameMatch && nameMatch[1] && nameMatch[1].trim().length > 0) {
+          const personName = nameMatch[1].trim()
+          if (!cameraRef.current) {
+            speak("Camera not active. Start navigation first.", "assertive")
+            return
+          }
+          const frame = cameraRef.current.captureFrame()
+          if (!frame) {
+            speak("Failed to capture image. Try again.", "assertive")
+            return
+          }
+          speak(`Looking for a face to register as ${personName}...`, "polite")
+          const backendHost = typeof window !== 'undefined' ? window.location.hostname : '127.0.0.1'
+          fetch(`http://${backendHost}:5001/face/register`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ image: frame, name: personName }),
+          })
+            .then(r => r.json())
+            .then(data => {
+              if (data.success) {
+                speak(`${personName} registered successfully. I will recognize them from now on.`, "assertive")
+              } else {
+                speak(data.message || "No face detected. Make sure the person is facing the camera.", "assertive")
+              }
+            })
+            .catch(() => {
+              speak("Error registering face. Please try again.", "assertive")
+            })
+        } else {
+          speak("Say add name followed by the person's name. For example, add name John.", "polite")
+        }
+
+      // 12. Help (lowest priority — catches remaining "help" not captured above)
       } else if (hasWord("help") || hasWord("commands")) {
         speak(
-          "Commands: allow, start, stop, show feed, call help, emergency, go back, where am I, read currency.",
+          "Commands: allow, start, stop, show feed, call help, emergency, go back, where am I, read currency, add name followed by a person's name.",
           "polite"
         )
       }

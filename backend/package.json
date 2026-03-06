@@ -15,6 +15,7 @@
     "@tensorflow-models/coco-ssd": "^2.2.2",
     "@tensorflow/tfjs": "^3.21.0",
     "@tensorflow/tfjs-node": "^4.22.0",
+    "@vladmandic/face-api": "^1.7.15",
     "cors": "^2.8.6",
     "express": "^5.2.1",
     "sharp": "^0.33.0"

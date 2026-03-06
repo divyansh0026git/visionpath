@@ -7,6 +7,9 @@ export interface DetectedObject {
     position?: "left" | "right" | "center";
     estimatedDistanceMeters?: number;
     estimatedSteps?: number;
+    approaching?: boolean;     // true if getting closer over recent frames
+    approachSpeed?: number;    // steps decrease per second (positive = approaching)
+    recognizedName?: string;   // face recognition result (for persons)
 }
 
 interface UseObjectDetectionProps {
@@ -113,6 +116,8 @@ export function useObjectDetection({
     const onDetectRef = useRef(onDetect);
     const onDescribeSceneRef = useRef(onDescribeScene);
     const distanceHistoryRef = useRef<Record<string, number[]>>({});
+    // Motion tracker: per-object-position history for approach/recede detection
+    const motionTrackerRef = useRef<Record<string, { steps: number[], timestamps: number[] }>>({});
 
     // Build backend URL dynamically so it works on localhost AND mobile/LAN
     const backendUrlRef = useRef(
@@ -251,6 +256,30 @@ export function useObjectDetection({
                     if (centerX < video.videoWidth / 3) position = "left";
                     else if (centerX > video.videoWidth * (2 / 3)) position = "right";
 
+                    // Motion tracking: track per class+position for approach detection
+                    const trackKey = `${label}_${position}`;
+                    const tracker = motionTrackerRef.current;
+                    if (!tracker[trackKey]) tracker[trackKey] = { steps: [], timestamps: [] };
+                    const track = tracker[trackKey];
+                    track.steps.push(smoothedSteps);
+                    track.timestamps.push(Date.now());
+                    if (track.steps.length > 8) {
+                        track.steps.shift();
+                        track.timestamps.shift();
+                    }
+
+                    let approaching = false;
+                    let approachSpeed = 0;
+                    if (track.steps.length >= 3) {
+                        const oldest = track.steps[0];
+                        const newest = track.steps[track.steps.length - 1];
+                        const timeDiffS = (track.timestamps[track.timestamps.length - 1] - track.timestamps[0]) / 1000;
+                        if (timeDiffS > 0) {
+                            approachSpeed = (oldest - newest) / timeDiffS; // positive = approaching
+                            approaching = approachSpeed > 0.5;
+                        }
+                    }
+
                     return {
                         class: label,
                         score: item.score ?? 0.85,
@@ -258,6 +287,8 @@ export function useObjectDetection({
                         position,
                         estimatedDistanceMeters: smoothedSteps * 0.76,
                         estimatedSteps: smoothedSteps,
+                        approaching,
+                        approachSpeed: parseFloat(approachSpeed.toFixed(2)),
                     };
                 })
                 .filter(Boolean) as DetectedObject[];
@@ -290,6 +321,7 @@ export function useObjectDetection({
             nextCallDelayMs.current = 300;
             lastCallTimeRef.current = 0;
             distanceHistoryRef.current = {};
+            motionTrackerRef.current = {};
             consecutiveFailsRef.current = 0;
             scanAttemptsRef.current = 0;
             return;

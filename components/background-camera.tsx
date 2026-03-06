@@ -22,6 +22,16 @@ const BackgroundCameraInner = forwardRef<BackgroundCameraHandle, BackgroundCamer
     const [facingMode, setFacingMode] = useState<"environment" | "user">("environment")
     const [cameraError, setCameraError] = useState<string | null>(null)
 
+    // Face recognition state
+    const faceRecogCooldownRef = useRef(0)
+    const recognizedNamesRef = useRef<string[]>([])
+    const backendUrlRef = useRef(
+        typeof window !== 'undefined'
+            ? `http://${window.location.hostname}:5001`
+            : 'http://127.0.0.1:5001'
+    )
+    const captureCanvasRef = useRef<HTMLCanvasElement | null>(null)
+
     // Initialize camera with abort signal to prevent race conditions
     useEffect(() => {
         if (!isNavigating) return
@@ -142,6 +152,119 @@ const BackgroundCameraInner = forwardRef<BackgroundCameraHandle, BackgroundCamer
             const confidentObjects = objects.filter(obj => obj.score > 0.5)
             if (confidentObjects.length === 0) return;
 
+            // --- Category Sets ---
+            const HAZARDS = new Set(['car', 'truck', 'bus', 'motorcycle', 'bicycle', 'train', 'boat', 'fire hydrant', 'horse', 'cow', 'elephant', 'bear'])
+            const TRIP_HAZARDS = new Set(['backpack', 'suitcase', 'skateboard', 'sports ball', 'frisbee', 'handbag', 'skis', 'snowboard', 'surfboard', 'bowl'])
+            const SHARP_OBJECTS = new Set(['knife', 'scissors', 'fork', 'baseball bat'])
+            const HOT_SURFACES = new Set(['oven', 'toaster', 'microwave'])
+            const LARGE_OBSTACLES = new Set(['bench', 'chair', 'couch', 'bed', 'dining table', 'toilet', 'refrigerator', 'sink', 'parking meter'])
+            const VEHICLES = new Set(['car', 'truck', 'bus', 'motorcycle', 'bicycle', 'train'])
+            const FRIENDLY_NAMES: Record<string, string> = {
+                'traffic light': 'traffic light', 'fire hydrant': 'fire hydrant',
+                'stop sign': 'stop sign', 'parking meter': 'parking meter',
+                'sports ball': 'ball', 'baseball bat': 'bat', 'baseball glove': 'glove',
+                'tennis racket': 'racket', 'wine glass': 'glass', 'hot dog': 'hot dog',
+                'potted plant': 'plant', 'dining table': 'table', 'cell phone': 'phone',
+                'teddy bear': 'teddy bear', 'hair drier': 'hair dryer',
+            }
+
+            // === URGENT: Fast-approaching vehicle warning (highest priority) ===
+            const dangerVehicle = confidentObjects.find(o =>
+                VEHICLES.has(o.class) && o.approaching && (o.approachSpeed || 0) > 3
+            )
+            if (dangerVehicle) {
+                const lastDanger = lastSpokenRef.current['__danger_vehicle'] || 0
+                if (now - lastDanger > 3000) {
+                    const vname = FRIENDLY_NAMES[dangerVehicle.class] || dangerVehicle.class
+                    speak(`DANGER! ${vname} approaching fast! Move aside now!`, "assertive")
+                    lastSpokenRef.current['__danger_vehicle'] = now
+                    return // Don't clutter with other announcements
+                }
+            }
+
+            // === Crowd detection ===
+            const personObjects = confidentObjects.filter(o => o.class === 'person')
+            if (personObjects.length >= 5) {
+                if (now - (lastSpokenRef.current['__crowd'] || 0) > 15000) {
+                    speak(`Large crowd ahead, about ${personObjects.length} people.`, "assertive")
+                    lastSpokenRef.current['__crowd'] = now
+                }
+            } else if (personObjects.length >= 3) {
+                if (now - (lastSpokenRef.current['__crowd'] || 0) > 15000) {
+                    speak(`Group of ${personObjects.length} people ahead.`, "polite")
+                    lastSpokenRef.current['__crowd'] = now
+                }
+            }
+
+            // === Traffic detection ===
+            const vehicleObjects = confidentObjects.filter(o => VEHICLES.has(o.class))
+            if (vehicleObjects.length >= 3) {
+                if (now - (lastSpokenRef.current['__traffic'] || 0) > 20000) {
+                    speak(`Traffic ahead, ${vehicleObjects.length} vehicles.`, "assertive")
+                    lastSpokenRef.current['__traffic'] = now
+                }
+            }
+
+            // === Face recognition (periodic, non-blocking) ===
+            if (personObjects.length > 0 && now - faceRecogCooldownRef.current > 4000) {
+                faceRecogCooldownRef.current = now
+                // Capture frame for face recognition
+                const video = videoRef.current
+                if (video && video.videoWidth > 0) {
+                    if (!captureCanvasRef.current) captureCanvasRef.current = document.createElement('canvas')
+                    const c = captureCanvasRef.current
+                    c.width = video.videoWidth
+                    c.height = video.videoHeight
+                    const ctx = c.getContext('2d')
+                    if (ctx) {
+                        ctx.drawImage(video, 0, 0)
+                        const frameB64 = c.toDataURL('image/jpeg', 0.8)
+                        fetch(`${backendUrlRef.current}/face/recognize`, {
+                            method: 'POST',
+                            headers: { 'Content-Type': 'application/json' },
+                            body: JSON.stringify({ image: frameB64 }),
+                        })
+                        .then(r => r.json())
+                        .then(data => {
+                            if (data.faces && data.faces.length > 0) {
+                                const names = data.faces
+                                    .filter((f: any) => f.name !== 'unknown')
+                                    .map((f: any) => f.name)
+                                recognizedNamesRef.current = names
+                                // Announce recognized persons
+                                names.forEach((name: string) => {
+                                    const lastAnnounced = lastSpokenRef.current[`__face_${name}`] || 0
+                                    if (now - lastAnnounced > 15000) {
+                                        speak(`${name} is here.`, "polite")
+                                        lastSpokenRef.current[`__face_${name}`] = Date.now()
+                                    }
+                                })
+                            } else {
+                                recognizedNamesRef.current = []
+                            }
+                        })
+                        .catch(() => {}) // Silently fail — face recognition is optional
+                    }
+                }
+            }
+
+            // === Person approaching / leaving detection ===
+            personObjects.forEach(person => {
+                if (person.approaching && (person.approachSpeed || 0) > 1 && (person.estimatedSteps || 99) < 8) {
+                    const lastApproach = lastSpokenRef.current['__person_approach'] || 0
+                    if (now - lastApproach > 8000) {
+                        const name = recognizedNamesRef.current.length > 0
+                            ? recognizedNamesRef.current[0]
+                            : 'Someone'
+                        const posStr = person.position === 'left' ? ' from your left' :
+                                       person.position === 'right' ? ' from your right' : ''
+                        speak(`${name} approaching${posStr}.`, "polite")
+                        lastSpokenRef.current['__person_approach'] = now
+                    }
+                }
+            })
+
+            // === Standard object announcements ===
             const groups: Record<string, { count: number, closestSteps: number, latestObj: any }> = {}
 
             confidentObjects.forEach((obj) => {
@@ -156,22 +279,6 @@ const BackgroundCameraInner = forwardRef<BackgroundCameraHandle, BackgroundCamer
 
             const sortedGroups = Object.values(groups).sort((a, b) => a.closestSteps - b.closestSteps)
 
-            // Import category sets from use-object-detection via dynamic check
-            const HAZARDS = new Set(['car', 'truck', 'bus', 'motorcycle', 'bicycle', 'train', 'boat', 'fire hydrant', 'horse', 'cow', 'elephant', 'bear'])
-            const TRIP_HAZARDS = new Set(['backpack', 'suitcase', 'skateboard', 'sports ball', 'frisbee', 'handbag', 'skis', 'snowboard', 'surfboard', 'bowl'])
-            const SHARP_OBJECTS = new Set(['knife', 'scissors', 'fork', 'baseball bat'])
-            const HOT_SURFACES = new Set(['oven', 'toaster', 'microwave'])
-            const LARGE_OBSTACLES = new Set(['bench', 'chair', 'couch', 'bed', 'dining table', 'toilet', 'refrigerator', 'sink', 'parking meter'])
-            const FRIENDLY_NAMES: Record<string, string> = {
-                'traffic light': 'traffic light', 'fire hydrant': 'fire hydrant',
-                'stop sign': 'stop sign', 'parking meter': 'parking meter',
-                'sports ball': 'ball', 'baseball bat': 'bat', 'baseball glove': 'glove',
-                'tennis racket': 'racket', 'wine glass': 'glass', 'hot dog': 'hot dog',
-                'potted plant': 'plant', 'dining table': 'table', 'cell phone': 'phone',
-                'teddy bear': 'teddy bear', 'hair drier': 'hair dryer',
-            }
-
-            // Collect messages — speak ONCE with all objects batched together
             const parts: string[] = []
             let hasHazard = false
 
@@ -180,7 +287,9 @@ const BackgroundCameraInner = forwardRef<BackgroundCameraHandle, BackgroundCamer
                 const objClass = latestObj.class
                 const lastSpoken = lastSpokenRef.current[objClass] || 0
 
-                // Determine danger category for prefix and cooldown
+                // Skip persons here if crowd/approach already announced
+                if (objClass === 'person' && personObjects.length >= 3) return
+
                 const isHazard = HAZARDS.has(objClass)
                 const isTripHazard = TRIP_HAZARDS.has(objClass) && closestSteps < 8
                 const isSharp = SHARP_OBJECTS.has(objClass) && closestSteps < 6
@@ -188,9 +297,13 @@ const BackgroundCameraInner = forwardRef<BackgroundCameraHandle, BackgroundCamer
                 const isLargeObstacle = LARGE_OBSTACLES.has(objClass) && closestSteps < 10
                 const isDangerous = isHazard || isTripHazard || isSharp || isHot
 
-                // Cooldowns based on danger level and proximity
+                // Fast-approaching vehicle gets shorter cooldown
+                const isApproachingFast = VEHICLES.has(objClass) && latestObj.approaching && (latestObj.approachSpeed || 0) > 1.5
+
                 let cooldownMs = 15000
-                if (isHazard) {
+                if (isApproachingFast) {
+                    cooldownMs = 3000
+                } else if (isHazard) {
                     cooldownMs = closestSteps < 10 ? 5000 : 10000
                 } else if (isTripHazard || isSharp || isHot) {
                     cooldownMs = 6000
@@ -206,28 +319,25 @@ const BackgroundCameraInner = forwardRef<BackgroundCameraHandle, BackgroundCamer
                     if (latestObj.position === "left") positionStr = "on your left"
                     if (latestObj.position === "right") positionStr = "on your right"
 
-                    // Category-aware prefix
                     let prefix = ""
-                    if (isHazard) prefix = "Caution, "
+                    if (isApproachingFast) prefix = "Warning, approaching "
+                    else if (isHazard) prefix = "Caution, "
                     else if (isTripHazard) prefix = "Watch your step, "
                     else if (isSharp) prefix = "Careful, sharp object, "
                     else if (isHot) prefix = "Careful, hot surface, "
                     else if (isLargeObstacle) prefix = "Obstacle, "
 
                     parts.push(`${prefix}${countStr} ${positionStr}, ${distanceStr}`)
-                    if (isDangerous) hasHazard = true
+                    if (isDangerous || isApproachingFast) hasHazard = true
                     lastSpokenRef.current[objClass] = now
                 }
             })
 
-            // Single speak call with all detected objects
             if (parts.length > 0) {
                 speak(parts.join(". ") + ".", hasHazard ? "assertive" : "polite")
             }
         },
     })
-
-    const captureCanvasRef = useRef<HTMLCanvasElement | null>(null)
 
     useImperativeHandle(ref, () => ({
         captureFrame: () => {
