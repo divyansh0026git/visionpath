@@ -122,6 +122,14 @@ export function useDeviceSensors() {
   const stepsRef = useRef(0)
   const headingRef = useRef(0)
 
+  // --- Fall detection state ---
+  const [fallDetected, setFallDetected] = useState(false)
+  const [fallCountdown, setFallCountdown] = useState(0)
+  const fallImpactTimeRef = useRef(0)
+  const fallStillSinceRef = useRef(0)
+  const fallCountdownTimerRef = useRef<ReturnType<typeof setInterval> | null>(null)
+  const fallDetectedRef = useRef(false)
+
   // --- Backtracking state ---
   const [backtrackState, setBacktrackState] = useState<BacktrackState>({
     isBacktracking: false,
@@ -152,6 +160,44 @@ export function useDeviceSensors() {
       const magnitude = Math.sqrt(acc.x ** 2 + acc.y ** 2 + acc.z ** 2)
       const delta = Math.abs(magnitude - lastAccelRef.current)
       const now = Date.now()
+
+      // --- Fall detection: high impact (>3g ≈ ~30 m/s²) followed by stillness ---
+      if (!fallDetectedRef.current) {
+        if (magnitude > 30) {
+          // Possible fall impact
+          fallImpactTimeRef.current = now
+          fallStillSinceRef.current = now
+        } else if (fallImpactTimeRef.current > 0) {
+          // After impact, check for stillness (low movement delta < 0.3)
+          if (delta < 0.3) {
+            if (fallStillSinceRef.current === 0) fallStillSinceRef.current = now
+            // Still for 5 seconds after impact → fall detected
+            if (now - fallStillSinceRef.current > 5000 && now - fallImpactTimeRef.current < 15000) {
+              fallDetectedRef.current = true
+              setFallDetected(true)
+              // Start 10-second countdown
+              let countdown = 10
+              setFallCountdown(countdown)
+              fallCountdownTimerRef.current = setInterval(() => {
+                countdown -= 1
+                setFallCountdown(countdown)
+                if (countdown <= 0) {
+                  if (fallCountdownTimerRef.current) clearInterval(fallCountdownTimerRef.current)
+                  fallCountdownTimerRef.current = null
+                }
+              }, 1000)
+              fallImpactTimeRef.current = 0
+              fallStillSinceRef.current = 0
+            }
+          } else {
+            // Movement resumed — reset fall detection
+            fallStillSinceRef.current = 0
+            if (now - fallImpactTimeRef.current > 15000) {
+              fallImpactTimeRef.current = 0 // Impact too old, ignore
+            }
+          }
+        }
+      }
 
       if (delta > stepThreshold && (now - lastStepTimeRef.current) > stepCooldownMs) {
         lastStepTimeRef.current = now
@@ -323,14 +369,29 @@ export function useDeviceSensors() {
     })
   }, [])
 
+  const dismissFall = useCallback(() => {
+    fallDetectedRef.current = false
+    setFallDetected(false)
+    setFallCountdown(0)
+    fallImpactTimeRef.current = 0
+    fallStillSinceRef.current = 0
+    if (fallCountdownTimerRef.current) {
+      clearInterval(fallCountdownTimerRef.current)
+      fallCountdownTimerRef.current = null
+    }
+  }, [])
+
   return {
     sensorData,
     breadcrumbs,
     isTracking,
     backtrackState,
+    fallDetected,
+    fallCountdown,
     startTracking,
     stopTracking,
     startBacktracking,
     stopBacktracking,
+    dismissFall,
   }
 }

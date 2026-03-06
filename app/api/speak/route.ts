@@ -4,7 +4,7 @@ import { promisify } from "util";
 
 const execFileAsync = promisify(execFile);
 
-const PIPER_MODEL = "/home/kali/.local/share/piper-voices/en_US-amy-low.onnx";
+const PIPER_MODEL = process.env.PIPER_MODEL_PATH || `${process.env.HOME || '/home/kali'}/.local/share/piper-voices/en_US-amy-low.onnx`;
 
 export async function POST(req: NextRequest) {
     try {

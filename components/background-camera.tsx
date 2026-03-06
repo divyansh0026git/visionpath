@@ -10,11 +10,12 @@ export interface BackgroundCameraHandle {
 
 interface BackgroundCameraProps {
     isNavigating: boolean
-    speak: (text: string, priority?: "polite" | "assertive") => void
+    speak: (text: string, priority?: "polite" | "assertive", pan?: number) => void
     showLiveView?: boolean
+    lowPowerMode?: boolean
 }
 
-const BackgroundCameraInner = forwardRef<BackgroundCameraHandle, BackgroundCameraProps>(({ isNavigating, speak, showLiveView = false }, ref) => {
+const BackgroundCameraInner = forwardRef<BackgroundCameraHandle, BackgroundCameraProps>(({ isNavigating, speak, showLiveView = false, lowPowerMode = false }, ref) => {
     const videoRef = useRef<HTMLVideoElement>(null)
     const overlayRef = useRef<HTMLCanvasElement>(null)
     const lastSpokenRef = useRef<Record<string, number>>({})
@@ -135,7 +136,7 @@ const BackgroundCameraInner = forwardRef<BackgroundCameraHandle, BackgroundCamer
     const { detectedObjects, scanError, scanAttempts } = useObjectDetection({
         isNavigating,
         videoRef,
-        invokeIntervalMs: 250,
+        invokeIntervalMs: lowPowerMode ? 1000 : 250,
         onDescribeScene: (description: string) => {
             speak(`Scene: ${description}`, "polite");
         },
@@ -167,8 +168,6 @@ const BackgroundCameraInner = forwardRef<BackgroundCameraHandle, BackgroundCamer
                 'potted plant': 'plant', 'dining table': 'table', 'cell phone': 'phone',
                 'teddy bear': 'teddy bear', 'hair drier': 'hair dryer',
             }
-
-            // === URGENT: Fast-approaching vehicle warning (highest priority) ===
             const dangerVehicle = confidentObjects.find(o =>
                 VEHICLES.has(o.class) && o.approaching && (o.approachSpeed || 0) > 3
             )
@@ -176,13 +175,18 @@ const BackgroundCameraInner = forwardRef<BackgroundCameraHandle, BackgroundCamer
                 const lastDanger = lastSpokenRef.current['__danger_vehicle'] || 0
                 if (now - lastDanger > 3000) {
                     const vname = FRIENDLY_NAMES[dangerVehicle.class] || dangerVehicle.class
-                    speak(`DANGER! ${vname} approaching fast! Move aside now!`, "assertive")
+                    // Urgent vibration pattern for danger
+                    if (typeof navigator !== 'undefined' && navigator.vibrate) {
+                        navigator.vibrate([200, 100, 200, 100, 200, 100, 200])
+                    }
+                    const dangerPan = dangerVehicle.position === 'left' ? -0.8
+                                    : dangerVehicle.position === 'right' ? 0.8
+                                    : 0
+                    speak(`DANGER! ${vname} approaching fast! Move aside now!`, "assertive", dangerPan)
                     lastSpokenRef.current['__danger_vehicle'] = now
-                    return // Don't clutter with other announcements
+                    return
                 }
             }
-
-            // === Crowd detection ===
             const personObjects = confidentObjects.filter(o => o.class === 'person')
             if (personObjects.length >= 5) {
                 if (now - (lastSpokenRef.current['__crowd'] || 0) > 15000) {
@@ -205,8 +209,8 @@ const BackgroundCameraInner = forwardRef<BackgroundCameraHandle, BackgroundCamer
                 }
             }
 
-            // === Face recognition (periodic, non-blocking) ===
-            if (personObjects.length > 0 && now - faceRecogCooldownRef.current > 4000) {
+            // === Face recognition (periodic, non-blocking — disabled in low power mode) ===
+            if (!lowPowerMode && personObjects.length > 0 && now - faceRecogCooldownRef.current > 4000) {
                 faceRecogCooldownRef.current = now
                 // Capture frame for face recognition
                 const video = videoRef.current
@@ -333,8 +337,25 @@ const BackgroundCameraInner = forwardRef<BackgroundCameraHandle, BackgroundCamer
                 }
             })
 
+            // === Vibration feedback based on proximity ===
+            if (typeof navigator !== 'undefined' && navigator.vibrate) {
+                const closestSteps = sortedGroups.length > 0 ? sortedGroups[0].closestSteps : 99
+                if (closestSteps < 3) {
+                    navigator.vibrate(300) // Continuous long vibration — very close
+                } else if (closestSteps < 6) {
+                    navigator.vibrate([100, 50, 100, 50, 100]) // Fast triple pulse — medium
+                } else if (closestSteps < 10 && hasHazard) {
+                    navigator.vibrate([100, 200, 100]) // Slow double pulse — hazard approaching
+                }
+            }
+
             if (parts.length > 0) {
-                speak(parts.join(". ") + ".", hasHazard ? "assertive" : "polite")
+                // Spatial audio: pan based on closest object position
+                const closestObj = sortedGroups[0]?.latestObj
+                const pan = closestObj?.position === 'left' ? -0.7
+                          : closestObj?.position === 'right' ? 0.7
+                          : 0
+                speak(parts.join(". ") + ".", hasHazard ? "assertive" : "polite", pan)
             }
         },
     })

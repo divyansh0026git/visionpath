@@ -21,6 +21,8 @@ export function useVoiceEngine({ onCommand, continuous = true }: VoiceEngineOpti
   const useFallbackTTSRef = useRef(false)
   const fallbackAudioRef = useRef<HTMLAudioElement | null>(null)
   const speakViaServerRef = useRef<((text: string) => void) | null>(null)
+  // Web Audio API context for spatial audio panning
+  const audioContextRef = useRef<AudioContext | null>(null)
 
   // Ref to always have the latest onCommand callback (fixes stale closure in onresult)
   const onCommandRef = useRef(onCommand)
@@ -187,7 +189,7 @@ export function useVoiceEngine({ onCommand, continuous = true }: VoiceEngineOpti
   const lastSpeakTimeRef = useRef(0)
 
   // Server-side TTS fallback via /api/speak (Piper neural TTS)
-  const speakViaServer = useCallback(async (text: string) => {
+  const speakViaServer = useCallback(async (text: string, pan?: number) => {
     try {
       isSpeakingRef.current = true
       console.log('[VOICE] Server TTS:', text.substring(0, 50))
@@ -199,6 +201,32 @@ export function useVoiceEngine({ onCommand, continuous = true }: VoiceEngineOpti
       if (!res.ok) throw new Error(`Server TTS failed: ${res.status}`)
       const blob = await res.blob()
       const url = URL.createObjectURL(blob)
+
+      // If spatial pan requested and Web Audio API is available, route through panner
+      if (pan !== undefined && pan !== 0 && typeof AudioContext !== 'undefined') {
+        try {
+          if (!audioContextRef.current) audioContextRef.current = new AudioContext()
+          const ctx = audioContextRef.current
+          if (ctx.state === 'suspended') await ctx.resume()
+          const arrayBuffer = await blob.arrayBuffer()
+          const audioBuffer = await ctx.decodeAudioData(arrayBuffer)
+          const source = ctx.createBufferSource()
+          source.buffer = audioBuffer
+          const panner = ctx.createStereoPanner()
+          panner.pan.value = Math.max(-1, Math.min(1, pan))
+          source.connect(panner)
+          panner.connect(ctx.destination)
+          source.onended = () => {
+            URL.revokeObjectURL(url)
+            setTimeout(() => { isSpeakingRef.current = false }, 200)
+          }
+          source.start()
+          return
+        } catch (e) {
+          console.warn('[VOICE] Spatial audio fallback to normal:', e)
+        }
+      }
+
       const audio = new Audio(url)
       fallbackAudioRef.current = audio
       audio.onended = () => {
@@ -219,7 +247,7 @@ export function useVoiceEngine({ onCommand, continuous = true }: VoiceEngineOpti
   }, [])
   speakViaServerRef.current = speakViaServer
 
-  const speak = useCallback((text: string, priority: "polite" | "assertive" = "polite") => {
+  const speak = useCallback((text: string, priority: "polite" | "assertive" = "polite", pan?: number) => {
     if (typeof window === 'undefined') return
 
     const now = Date.now()
@@ -244,7 +272,7 @@ export function useVoiceEngine({ onCommand, continuous = true }: VoiceEngineOpti
 
     // Use server-side fallback when browser has no voices
     if (useFallbackTTSRef.current || !window.speechSynthesis) {
-      speakViaServer(text)
+      speakViaServer(text, pan)
       return
     }
 
@@ -287,7 +315,7 @@ export function useVoiceEngine({ onCommand, continuous = true }: VoiceEngineOpti
     if (window.speechSynthesis.getVoices().length === 0) {
       console.log('[VOICE] No browser voices — using server TTS for:', text.substring(0, 50))
       useFallbackTTSRef.current = true
-      speakViaServer(text)
+      speakViaServer(text, pan)
       return
     }
 

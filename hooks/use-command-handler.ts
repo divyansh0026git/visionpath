@@ -18,6 +18,7 @@ interface CommandActions {
   startBacktracking: (breadcrumbs: Breadcrumb[]) => boolean
   stopBacktracking: () => void
   speak: (text: string, priority?: "polite" | "assertive") => void
+  dismissFall: () => void
 }
 
 interface CommandContext {
@@ -47,7 +48,7 @@ export function useCommandHandler(
       const {
         setScreen, setIsPanicActive, setStatusMessage, setShowLiveCamera,
         setTriggerPermissionRequest, startTracking, stopTracking,
-        startBacktracking, stopBacktracking, speak,
+        startBacktracking, stopBacktracking, speak, dismissFall,
       } = actionsRef.current
       const { sensorData, breadcrumbs, backtrackState, emergencyNumber, cameraRef } = contextRef.current
       const cmd = command.toLowerCase().trim()
@@ -57,6 +58,13 @@ export function useCommandHandler(
       const hasPhrase = (phrase: string) => cmd.includes(phrase)
 
       // --- Priority-ordered command matching (most specific first) ---
+
+      // 0. Cancel fall detection countdown
+      if (hasWord("cancel") || hasPhrase("i'm okay") || hasPhrase("i am okay") || hasPhrase("i'm fine") || hasPhrase("i am fine") || hasPhrase("false alarm")) {
+        dismissFall()
+        speak("Fall alert cancelled.", "assertive")
+        return
+      }
 
       // 1. Directional query (very specific phrase)
       if (hasPhrase("which way is")) {
@@ -74,7 +82,39 @@ export function useCommandHandler(
           speak("I didn't catch the direction. Ask which way is north, south, east, or west.", "polite")
         }
 
-      // 2. Currency detection (specific phrases)
+      // 2. Scene description ("describe scene" / "what do you see" / "describe" / "look around")
+      } else if (hasPhrase("describe scene") || hasPhrase("what do you see") || hasPhrase("look around") || hasPhrase("describe surroundings") || (hasWord("describe") && !hasPhrase("describe to"))) {
+        if (!cameraRef.current) {
+          speak("Camera is not active. Say start to begin navigation first.", "assertive")
+          return
+        }
+        const frameBase64 = cameraRef.current.captureFrame()
+        if (!frameBase64) {
+          speak("Failed to capture image. Please try again.", "assertive")
+          return
+        }
+        speak("Analyzing your surroundings...", "polite")
+        fetch("/api/describe", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ image: frameBase64, mode: "describe" })
+        })
+          .then(res => res.json())
+          .then(data => {
+            if (data.result) {
+              speak(`I see: ${data.result}`, "assertive")
+            } else if (data.error) {
+              speak(data.error === "Rate limit exceeded" ? "Scene description is rate limited. Try again shortly." : "Sorry, I couldn't describe the scene.", "assertive")
+            } else {
+              speak("Nothing clear detected.", "polite")
+            }
+          })
+          .catch(err => {
+            console.error("[DESCRIBE]", err)
+            speak("Error connecting to scene description service.", "assertive")
+          })
+
+      // 3. Currency detection (specific phrases)
       } else if (hasPhrase("what is this") || hasPhrase("read currency") || hasPhrase("identify cash") || hasPhrase("how much rupee")) {
         if (!cameraRef.current) {
           speak("Camera is not active. Say start to begin navigation first.", "assertive")
@@ -221,10 +261,107 @@ export function useCommandHandler(
           speak("Say add name followed by the person's name. For example, add name John.", "polite")
         }
 
-      // 12. Help (lowest priority — catches remaining "help" not captured above)
+      // 12. Save route — "save route kitchen" / "save path bedroom"
+      } else if (hasPhrase("save route") || hasPhrase("save path") || hasPhrase("remember route") || hasPhrase("remember path")) {
+        const routeMatch = cmd.match(/(?:save route|save path|remember route|remember path)\s+(.+)/)
+        if (routeMatch && routeMatch[1] && routeMatch[1].trim().length > 0) {
+          const routeName = routeMatch[1].trim().replace(/[^a-zA-Z0-9 ]/g, '').substring(0, 50)
+          if (breadcrumbs.length < 3) {
+            speak("Not enough steps recorded. Walk a path first before saving.", "assertive")
+          } else {
+            try {
+              const savedRoutes = JSON.parse(localStorage.getItem('visionPathRoutes') || '{}')
+              savedRoutes[routeName] = breadcrumbs
+              localStorage.setItem('visionPathRoutes', JSON.stringify(savedRoutes))
+              speak(`Route ${routeName} saved with ${breadcrumbs.length} breadcrumbs.`, "assertive")
+            } catch {
+              speak("Failed to save route. Storage may be full.", "assertive")
+            }
+          }
+        } else {
+          speak("Say save route followed by a name. For example, save route kitchen.", "polite")
+        }
+
+      // 13. Navigate to saved route — "navigate to kitchen" / "go to kitchen"
+      } else if (hasPhrase("navigate to") || hasPhrase("go to") || hasPhrase("take me to")) {
+        const routeMatch = cmd.match(/(?:navigate to|go to|take me to)\s+(.+)/)
+        if (routeMatch && routeMatch[1] && routeMatch[1].trim().length > 0) {
+          const routeName = routeMatch[1].trim()
+          try {
+            const savedRoutes = JSON.parse(localStorage.getItem('visionPathRoutes') || '{}')
+            // Case-insensitive route lookup
+            const matchedKey = Object.keys(savedRoutes).find(
+              k => k.toLowerCase() === routeName.toLowerCase()
+            )
+            if (matchedKey && Array.isArray(savedRoutes[matchedKey]) && savedRoutes[matchedKey].length > 0) {
+              const routeBreadcrumbs = savedRoutes[matchedKey] as Breadcrumb[]
+              const started = startBacktracking(routeBreadcrumbs)
+              if (started) {
+                setScreen("navigate")
+                startTracking()
+                speak(`Following saved route to ${matchedKey}. ${routeBreadcrumbs.length} steps. Follow audio cues.`, "assertive")
+                setStatusMessage(`Navigating to ${matchedKey}`)
+              } else {
+                speak("Unable to build navigation path for that route.", "assertive")
+              }
+            } else {
+              // List available routes
+              const routeNames = Object.keys(savedRoutes)
+              if (routeNames.length > 0) {
+                speak(`Route ${routeName} not found. Available routes: ${routeNames.join(', ')}.`, "assertive")
+              } else {
+                speak("No saved routes found. Walk a path and say save route followed by a name.", "assertive")
+              }
+            }
+          } catch {
+            speak("Error loading saved routes.", "assertive")
+          }
+        } else {
+          speak("Say navigate to followed by a route name. For example, navigate to kitchen.", "polite")
+        }
+
+      // 14. List saved routes — "list routes" / "my routes" / "saved routes"
+      } else if (hasPhrase("list route") || hasPhrase("my route") || hasPhrase("saved route")) {
+        try {
+          const savedRoutes = JSON.parse(localStorage.getItem('visionPathRoutes') || '{}')
+          const routeNames = Object.keys(savedRoutes)
+          if (routeNames.length > 0) {
+            speak(`You have ${routeNames.length} saved routes: ${routeNames.join(', ')}.`, "assertive")
+          } else {
+            speak("No saved routes. Walk a path and say save route followed by a name to save it.", "polite")
+          }
+        } catch {
+          speak("Error reading saved routes.", "assertive")
+        }
+
+      // 15. Delete saved route — "delete route kitchen"
+      } else if (hasPhrase("delete route") || hasPhrase("remove route") || hasPhrase("forget route")) {
+        const routeMatch = cmd.match(/(?:delete route|remove route|forget route)\s+(.+)/)
+        if (routeMatch && routeMatch[1] && routeMatch[1].trim().length > 0) {
+          const routeName = routeMatch[1].trim()
+          try {
+            const savedRoutes = JSON.parse(localStorage.getItem('visionPathRoutes') || '{}')
+            const matchedKey = Object.keys(savedRoutes).find(
+              k => k.toLowerCase() === routeName.toLowerCase()
+            )
+            if (matchedKey) {
+              delete savedRoutes[matchedKey]
+              localStorage.setItem('visionPathRoutes', JSON.stringify(savedRoutes))
+              speak(`Route ${matchedKey} deleted.`, "assertive")
+            } else {
+              speak(`Route ${routeName} not found.`, "assertive")
+            }
+          } catch {
+            speak("Error deleting route.", "assertive")
+          }
+        } else {
+          speak("Say delete route followed by the route name.", "polite")
+        }
+
+      // 16. Help (lowest priority — catches remaining "help" not captured above)
       } else if (hasWord("help") || hasWord("commands")) {
         speak(
-          "Commands: allow, start, stop, show feed, call help, emergency, go back, where am I, read currency, add name followed by a person's name.",
+          "Commands: allow, start, stop, show feed, call help, emergency, go back, where am I, read currency, describe scene, add name followed by a person's name, save route, navigate to, list routes, delete route.",
           "polite"
         )
       }

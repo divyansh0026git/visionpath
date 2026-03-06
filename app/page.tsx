@@ -34,13 +34,48 @@ export default function VisionPathApp() {
   const [triggerPermissionRequest, setTriggerPermissionRequest] = useState(false)
   const [hasInteracted, setHasInteracted] = useState(false)
   const [emergencyNumber, setEmergencyNumber] = useState("911")
+  const [lowPowerMode, setLowPowerMode] = useState(false)
   const cameraRef = useRef<BackgroundCameraHandle>(null)
+  const lowPowerAnnouncedRef = useRef(false)
 
   // --- Load saved emergency number ---
   useEffect(() => {
     const saved = localStorage.getItem("visionPathEmergencyNumber")
     if (saved) setEmergencyNumber(saved)
   }, [])
+
+  // --- Battery monitoring for power-saving mode ---
+  useEffect(() => {
+    if (typeof navigator === 'undefined' || !('getBattery' in navigator)) return
+    let battery: any = null
+    const checkBattery = () => {
+      if (!battery) return
+      const level = battery.level
+      if (level <= 0.20 && !lowPowerMode) {
+        setLowPowerMode(true)
+        if (!lowPowerAnnouncedRef.current) {
+          lowPowerAnnouncedRef.current = true
+          // Speak will be available after voice engine loads — use timeout
+          setTimeout(() => {
+            speakRef.current?.("Battery low. Switching to power saving mode. Detection frequency reduced.", "assertive")
+          }, 500)
+        }
+      } else if (level > 0.25 && lowPowerMode) {
+        setLowPowerMode(false)
+        lowPowerAnnouncedRef.current = false
+      }
+    }
+
+    ;(navigator as any).getBattery().then((b: any) => {
+      battery = b
+      checkBattery()
+      b.addEventListener('levelchange', checkBattery)
+    }).catch(() => {})
+
+    return () => {
+      if (battery) battery.removeEventListener('levelchange', checkBattery)
+    }
+  }, [lowPowerMode])
 
   const saveEmergencyNumber = useCallback((num: string) => {
     setEmergencyNumber(num)
@@ -50,7 +85,8 @@ export default function VisionPathApp() {
   // --- Sensor + navigation hooks ---
   const {
     sensorData, breadcrumbs, isTracking, backtrackState,
-    startTracking, stopTracking, startBacktracking, stopBacktracking,
+    fallDetected, fallCountdown,
+    startTracking, stopTracking, startBacktracking, stopBacktracking, dismissFall,
   } = useDeviceSensors()
 
   // --- Stable speak reference (fixes circular dependency with useVoiceEngine) ---
@@ -64,7 +100,7 @@ export default function VisionPathApp() {
     {
       setScreen, setIsPanicActive, setStatusMessage: setStatusMessageWithAutoClear, setShowLiveCamera,
       setTriggerPermissionRequest, startTracking, stopTracking,
-      startBacktracking, stopBacktracking, speak: stableSpeak,
+      startBacktracking, stopBacktracking, speak: stableSpeak, dismissFall,
     },
     { sensorData, breadcrumbs, backtrackState, emergencyNumber, cameraRef }
   )
@@ -84,6 +120,30 @@ export default function VisionPathApp() {
     setStatusMessage: setStatusMessageWithAutoClear,
     setIsPanicActive,
   })
+
+  // --- Fall detection auto-emergency ---
+  useEffect(() => {
+    if (!fallDetected) return
+    if (fallCountdown > 0) {
+      // Countdown in progress — vibrate and announce
+      speak(`Fall detected. Emergency in ${fallCountdown} seconds. Say cancel to abort.`, "assertive")
+      if (typeof navigator !== 'undefined' && navigator.vibrate) {
+        navigator.vibrate([300, 200, 300])
+      }
+    } else if (fallCountdown === 0 && fallDetected) {
+      // Countdown finished — trigger emergency
+      setIsPanicActive(true)
+      setScreen("emergency")
+      if (breadcrumbs.length > 0) {
+        startBacktracking(breadcrumbs)
+      }
+      speak("Fall emergency activated. Calling for help. Stay calm.", "assertive")
+      setStatusMessageWithAutoClear("FALL DETECTED - EMERGENCY")
+      if (typeof navigator !== 'undefined' && navigator.vibrate) {
+        navigator.vibrate([500, 200, 500, 200, 500])
+      }
+    }
+  }, [fallDetected, fallCountdown, speak, setIsPanicActive, breadcrumbs, startBacktracking, setStatusMessageWithAutoClear])
 
   // --- Panic button handler (extracted hook) ---
   const handlePanic = usePanicHandler({
@@ -199,6 +259,7 @@ export default function VisionPathApp() {
             isNavigating={isTracking || isPanicActive}
             speak={speak}
             showLiveView={showLiveCamera}
+            lowPowerMode={lowPowerMode}
           />
         )}
 
