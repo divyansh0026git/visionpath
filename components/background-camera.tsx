@@ -167,13 +167,13 @@ const BackgroundCameraInner = forwardRef<BackgroundCameraHandle, BackgroundCamer
                 const isHazard = hazards.includes(objClass)
                 const lastSpoken = lastSpokenRef.current[objClass] || 0
 
-                // Cooldowns: longer gaps to avoid spam
-                let cooldownMs = 20000;
+                // Cooldowns: generous gaps to avoid voice spam
+                let cooldownMs = 30000;
                 if (isHazard) {
                     if (objClass === 'wall') {
-                        cooldownMs = closestSteps < 5 ? 8000 : 15000;
+                        cooldownMs = closestSteps < 5 ? 12000 : 20000;
                     } else {
-                        cooldownMs = closestSteps < 15 ? 10000 : 15000;
+                        cooldownMs = closestSteps < 15 ? 15000 : 20000;
                     }
                 }
 

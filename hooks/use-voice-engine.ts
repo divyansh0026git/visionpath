@@ -20,7 +20,7 @@ export function useVoiceEngine({ onCommand, continuous = true }: VoiceEngineOpti
   const pendingUtteranceRef = useRef<SpeechSynthesisUtterance | null>(null)
   const useFallbackTTSRef = useRef(false)
   const fallbackAudioRef = useRef<HTMLAudioElement | null>(null)
-  const speakViaServerRef = useRef<((text: string, rate: number) => void) | null>(null)
+  const speakViaServerRef = useRef<((text: string) => void) | null>(null)
 
   // Ref to always have the latest onCommand callback (fixes stale closure in onresult)
   const onCommandRef = useRef(onCommand)
@@ -67,9 +67,8 @@ export function useVoiceEngine({ onCommand, continuous = true }: VoiceEngineOpti
         // Play any queued message via fallback
         if (pendingUtteranceRef.current) {
           const pendingText = pendingUtteranceRef.current.text
-          const pendingRate = pendingUtteranceRef.current.rate ?? 1
           pendingUtteranceRef.current = null
-          speakViaServerRef.current?.(pendingText, pendingRate)
+          speakViaServerRef.current?.(pendingText)
         }
       }
     }, 5000)
@@ -187,15 +186,15 @@ export function useVoiceEngine({ onCommand, continuous = true }: VoiceEngineOpti
   const speakTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const lastSpeakTimeRef = useRef(0)
 
-  // Server-side TTS fallback via /api/speak (espeak-ng)
-  const speakViaServer = useCallback(async (text: string, rate: number) => {
+  // Server-side TTS fallback via /api/speak (Piper neural TTS)
+  const speakViaServer = useCallback(async (text: string) => {
     try {
       isSpeakingRef.current = true
       console.log('[VOICE] Server TTS:', text.substring(0, 50))
       const res = await fetch('/api/speak', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ text, rate }),
+        body: JSON.stringify({ text }),
       })
       if (!res.ok) throw new Error(`Server TTS failed: ${res.status}`)
       const blob = await res.blob()
@@ -225,10 +224,10 @@ export function useVoiceEngine({ onCommand, continuous = true }: VoiceEngineOpti
 
     const now = Date.now()
 
-    // For polite speech: skip entirely if already speaking or spoke recently (6s cooldown)
+    // For polite speech: skip entirely if already speaking or spoke recently (10s cooldown)
     if (priority === "polite") {
       if (isSpeakingRef.current) return
-      if (now - lastSpeakTimeRef.current < 6000) return
+      if (now - lastSpeakTimeRef.current < 10000) return
     }
 
     // Assertive speech cancels current speech
@@ -245,8 +244,7 @@ export function useVoiceEngine({ onCommand, continuous = true }: VoiceEngineOpti
 
     // Use server-side fallback when browser has no voices
     if (useFallbackTTSRef.current || !window.speechSynthesis) {
-      const rate = priority === "assertive" ? 1.1 : 0.95
-      speakViaServer(text, rate)
+      speakViaServer(text)
       return
     }
 
@@ -289,7 +287,7 @@ export function useVoiceEngine({ onCommand, continuous = true }: VoiceEngineOpti
     if (window.speechSynthesis.getVoices().length === 0) {
       console.log('[VOICE] No browser voices — using server TTS for:', text.substring(0, 50))
       useFallbackTTSRef.current = true
-      speakViaServer(text, utterance.rate)
+      speakViaServer(text)
       return
     }
 

@@ -1,43 +1,44 @@
 import { NextRequest, NextResponse } from "next/server";
-import { execFile } from "child_process";
+import { spawn, execFile } from "child_process";
 import { promisify } from "util";
 
 const execFileAsync = promisify(execFile);
 
+const PIPER_MODEL = "/home/kali/.local/share/piper-voices/en_US-amy-low.onnx";
+
 /**
  * POST /api/speak
- * Server-side TTS fallback using espeak-ng.
+ * Server-side TTS using Piper neural TTS (high quality).
+ * Falls back to espeak-ng if Piper is unavailable.
  * Returns audio/wav that the browser can play directly.
- * Used when browser's speechSynthesis has no voices loaded.
  */
 export async function POST(req: NextRequest) {
     try {
-        const { text, rate } = await req.json();
+        const { text } = await req.json();
 
         if (!text || typeof text !== "string") {
             return NextResponse.json({ error: "No text provided" }, { status: 400 });
         }
 
-        // Limit text length to prevent abuse
         const safeText = text.slice(0, 500);
 
-        // espeak-ng speed: default 175 wpm, range 80-450
-        const speed = rate && rate > 1 ? 190 : 170;
+        let wavBuffer: Buffer;
 
-        // Generate WAV audio using espeak-ng
-        const { stdout } = await execFileAsync(
-            "espeak-ng",
-            [
-                "--stdout",       // Output WAV to stdout
-                "-v", "en",       // English voice
-                "-s", String(speed),
-                "-a", "100",      // Volume (0-200)
-                safeText,
-            ],
-            { encoding: "buffer", maxBuffer: 2 * 1024 * 1024, timeout: 10000 }
-        );
+        try {
+            // Primary: Piper neural TTS (clear, natural voice)
+            wavBuffer = await piperSpeak(safeText);
+        } catch (e) {
+            // Fallback: espeak-ng (robotic but always available)
+            console.warn("[/api/speak] Piper failed, falling back to espeak-ng:", e);
+            const { stdout } = await execFileAsync(
+                "espeak-ng",
+                ["--stdout", "-v", "en-us", "-s", "185", "-a", "100", safeText],
+                { encoding: "buffer", maxBuffer: 2 * 1024 * 1024, timeout: 10000 }
+            );
+            wavBuffer = stdout;
+        }
 
-        return new NextResponse(stdout, {
+        return new NextResponse(new Uint8Array(wavBuffer), {
             headers: {
                 "Content-Type": "audio/wav",
                 "Cache-Control": "no-store",
@@ -50,4 +51,65 @@ export async function POST(req: NextRequest) {
             { status: 500 }
         );
     }
+}
+
+/** Run Piper TTS: pipe text to stdin, get raw PCM from stdout, wrap as WAV */
+function piperSpeak(text: string): Promise<Buffer> {
+    return new Promise((resolve, reject) => {
+        const proc = spawn("piper", [
+            "--model", PIPER_MODEL,
+            "--output-raw",
+        ], { stdio: ["pipe", "pipe", "pipe"] });
+
+        const chunks: Buffer[] = [];
+        let stderr = "";
+
+        proc.stdout.on("data", (chunk: Buffer) => chunks.push(chunk));
+        proc.stderr.on("data", (chunk: Buffer) => { stderr += chunk.toString(); });
+
+        proc.on("close", (code) => {
+            if (code !== 0) {
+                return reject(new Error(`Piper exited ${code}: ${stderr}`));
+            }
+            const pcm = Buffer.concat(chunks);
+            if (pcm.length === 0) {
+                return reject(new Error("Piper produced no audio"));
+            }
+            resolve(wrapPCMInWav(pcm, 16000, 1, 16));
+        });
+
+        proc.on("error", reject);
+
+        // Timeout after 15s
+        const timer = setTimeout(() => {
+            proc.kill("SIGKILL");
+            reject(new Error("Piper timed out"));
+        }, 15000);
+        proc.on("close", () => clearTimeout(timer));
+
+        // Feed text to piper's stdin
+        proc.stdin.write(text);
+        proc.stdin.end();
+    });
+}
+
+/** Wrap raw PCM samples in a WAV header */
+function wrapPCMInWav(pcm: Buffer, sampleRate: number, channels: number, bitsPerSample: number): Buffer {
+    const byteRate = sampleRate * channels * (bitsPerSample / 8);
+    const blockAlign = channels * (bitsPerSample / 8);
+    const header = Buffer.alloc(44);
+    header.write("RIFF", 0);
+    header.writeUInt32LE(36 + pcm.length, 4);
+    header.write("WAVE", 8);
+    header.write("fmt ", 12);
+    header.writeUInt32LE(16, 16);
+    header.writeUInt16LE(1, 20);
+    header.writeUInt16LE(channels, 22);
+    header.writeUInt32LE(sampleRate, 24);
+    header.writeUInt32LE(byteRate, 28);
+    header.writeUInt16LE(blockAlign, 32);
+    header.writeUInt16LE(bitsPerSample, 34);
+    header.write("data", 36);
+    header.writeUInt32LE(pcm.length, 40);
+    return Buffer.concat([header, pcm]);
 }

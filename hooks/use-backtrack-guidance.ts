@@ -27,7 +27,7 @@ export function useBacktrackGuidance({
     const interval = setInterval(() => {
       if (!backtrackState.currentSegment) return
       const now = Date.now()
-      if (now - lastGuidanceRef.current < 7500) return
+      if (now - lastGuidanceRef.current < 12000) return
       lastGuidanceRef.current = now
 
       const { instruction, aligned } = getTurnInstruction(
