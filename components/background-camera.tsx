@@ -3,6 +3,7 @@
 import { useRef, useEffect, useState, forwardRef, useImperativeHandle } from "react"
 import { RefreshCcw } from "lucide-react"
 import { useObjectDetection } from "@/hooks/use-object-detection"
+import { getBackendUrl } from "@/lib/backend-url"
 
 export interface BackgroundCameraHandle {
     captureFrame: () => string | null;
@@ -26,11 +27,7 @@ const BackgroundCameraInner = forwardRef<BackgroundCameraHandle, BackgroundCamer
     // Face recognition state
     const faceRecogCooldownRef = useRef(0)
     const recognizedNamesRef = useRef<string[]>([])
-    const backendUrlRef = useRef(
-        typeof window !== 'undefined'
-            ? `http://${window.location.hostname}:5001`
-            : 'http://127.0.0.1:5001'
-    )
+    const backendUrlRef = useRef(getBackendUrl())
     const captureCanvasRef = useRef<HTMLCanvasElement | null>(null)
 
     // Initialize camera with abort signal to prevent race conditions

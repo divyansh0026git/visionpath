@@ -1,4 +1,5 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
+import { getBackendUrl } from '@/lib/backend-url';
 
 export interface DetectedObject {
     class: string;
@@ -120,11 +121,7 @@ export function useObjectDetection({
     const motionTrackerRef = useRef<Record<string, { steps: number[], timestamps: number[] }>>({});
 
     // Build backend URL dynamically so it works on localhost AND mobile/LAN
-    const backendUrlRef = useRef(
-        typeof window !== 'undefined'
-            ? `http://${window.location.hostname}:5001`
-            : 'http://127.0.0.1:5001'
-    );
+    const backendUrlRef = useRef(getBackendUrl());
 
     useEffect(() => { onDetectRef.current = onDetect; }, [onDetect]);
     useEffect(() => { onDescribeSceneRef.current = onDescribeScene; }, [onDescribeScene]);

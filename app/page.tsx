@@ -183,16 +183,11 @@ export default function VisionPathApp() {
   // --- Main app shell ---
   return (
     <main className="flex min-h-dvh flex-col bg-background" role="application" aria-label="Vision Path navigation app">
-      {/* Header */}
-      <header className="flex items-center justify-between px-6 pb-4 pt-safe-top">
-        <div className="flex items-center gap-3 pt-6">
-          <div className="flex h-12 w-12 items-center justify-center rounded-xl bg-primary">
-            <Eye className="h-7 w-7 text-primary-foreground" />
-          </div>
-          <div>
-            <h1 className="text-xl font-bold text-foreground">Vision Path</h1>
-            <p className="text-xs text-muted-foreground">Eyes-Free Navigation</p>
-          </div>
+      {/* Compact header */}
+      <header className="flex items-center justify-between px-5 py-3 pt-6">
+        <div className="flex items-center gap-2">
+          <Eye className="h-6 w-6 text-primary" />
+          <h1 className="text-lg font-bold text-foreground">Vision Path</h1>
         </div>
         <div
           className={`rounded-full px-3 py-1 text-xs font-bold ${
@@ -207,13 +202,13 @@ export default function VisionPathApp() {
 
       {/* Status bar */}
       {statusMessage && (
-        <div className="mx-6 mb-4 rounded-xl bg-card px-4 py-3 text-center text-sm font-medium text-foreground" role="status" aria-live="assertive">
+        <div className="mx-5 mb-3 rounded-xl bg-card px-4 py-3 text-center text-sm font-medium text-foreground" role="status" aria-live="assertive">
           {statusMessage}
         </div>
       )}
 
       {/* Screen router */}
-      <div className="flex flex-1 flex-col items-center gap-6 px-6 pb-6">
+      <div className="flex flex-1 flex-col items-center gap-4 px-5 pb-4">
         {screen === "home" && (
           <HomeScreen
             onStartNavigation={() => {

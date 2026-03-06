@@ -2,6 +2,7 @@
 
 import { useCallback, useRef, useEffect, type RefObject } from "react"
 import { getCardinalDirection } from "@/lib/navigation"
+import { getBackendUrl } from "@/lib/backend-url"
 import type { BacktrackState, Breadcrumb } from "@/hooks/use-device-sensors"
 import type { BackgroundCameraHandle } from "@/components/background-camera"
 
@@ -240,8 +241,7 @@ export function useCommandHandler(
             return
           }
           speak(`Looking for a face to register as ${personName}...`, "polite")
-          const backendHost = typeof window !== 'undefined' ? window.location.hostname : '127.0.0.1'
-          fetch(`http://${backendHost}:5001/face/register`, {
+          fetch(`${getBackendUrl()}/face/register`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ image: frame, name: personName }),
