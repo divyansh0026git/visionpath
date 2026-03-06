@@ -122,7 +122,7 @@ const BackgroundCameraInner = forwardRef<BackgroundCameraHandle, BackgroundCamer
         }
     }, [isNavigating, facingMode])
 
-    const { detectedObjects } = useObjectDetection({
+    const { detectedObjects, scanError, scanAttempts } = useObjectDetection({
         isNavigating,
         videoRef,
         invokeIntervalMs: 1000,
@@ -289,9 +289,16 @@ const BackgroundCameraInner = forwardRef<BackgroundCameraHandle, BackgroundCamer
                     aria-hidden="true"
                 />
             )}
-            {showLiveView && detectedObjects.length === 0 && !cameraError && (
+            {showLiveView && detectedObjects.length === 0 && !cameraError && !scanError && (
                 <div className="absolute inset-0 z-20 flex items-center justify-center bg-black/20 pointer-events-none">
-                    <p className="text-white bg-black/50 px-3 py-1 rounded-full text-sm">Scanning...</p>
+                    <p className="text-white bg-black/50 px-3 py-1 rounded-full text-sm">
+                        {scanAttempts === 0 ? "Starting camera..." : scanAttempts < 5 ? `Scanning... (${scanAttempts})` : "No objects detected \u2014 keep scanning"}
+                    </p>
+                </div>
+            )}
+            {showLiveView && scanError && (
+                <div className="absolute inset-0 z-20 flex items-center justify-center bg-black/30 pointer-events-none">
+                    <p className="text-white bg-orange-600/80 px-4 py-2 rounded-full text-sm text-center">{scanError}</p>
                 </div>
             )}
             {showLiveView && cameraError && (

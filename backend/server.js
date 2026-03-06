@@ -28,7 +28,18 @@ async function loadModel() {
   if (!model) {
     console.log("[BACKEND] Loading COCO-SSD model...");
     model = await cocoSsd.load({ base: "lite_mobilenet_v2" });
-    console.log("[BACKEND] COCO-SSD model loaded successfully.");
+    console.log("[BACKEND] COCO-SSD model loaded. Running warmup inference...");
+    // Warmup: run a dummy detection to trigger JIT graph compilation.
+    // Without this, the first real detection can take 10-15+ seconds on pure CPU TF.js.
+    const dummyTensor = tf.zeros([224, 224, 3], "int32");
+    try {
+      await model.detect(dummyTensor);
+      console.log("[BACKEND] Warmup inference complete.");
+    } catch (e) {
+      console.warn("[BACKEND] Warmup inference failed (non-critical):", e.message);
+    } finally {
+      dummyTensor.dispose();
+    }
   }
   return model;
 }
@@ -75,7 +86,7 @@ app.post("/detect", async (req, res) => {
 
     imageTensor = await decodeBase64Image(image);
 
-    const predictions = await detector.detect(imageTensor);
+    const predictions = await detector.detect(imageTensor, 20, 0.3);
 
     // Format predictions to match the expected client-side schema
     const objects = predictions.map((pred) => ({

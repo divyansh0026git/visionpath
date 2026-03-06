@@ -38,12 +38,16 @@ export function useObjectDetection({
     onDescribeScene,
 }: UseObjectDetectionProps) {
     const [detectedObjects, setDetectedObjects] = useState<DetectedObject[]>([]);
+    const [scanError, setScanError] = useState<string | null>(null);
+    const [scanAttempts, setScanAttempts] = useState(0);
 
     // Request gate — only one API call in-flight at a time
     const isRequestInFlightRef = useRef(false);
-    // How long to wait before next call (increases on rate limit)
-    const nextCallDelayMs = useRef(4000);
+    // How long to wait before next call (shorter initially, increases after success)
+    const nextCallDelayMs = useRef(1500);
     const lastCallTimeRef = useRef(0);
+    const consecutiveFailsRef = useRef(0);
+    const scanAttemptsRef = useRef(0);
 
     const canvasRef = useRef<HTMLCanvasElement | null>(null);
     const onDetectRef = useRef(onDetect);
@@ -67,7 +71,7 @@ export function useObjectDetection({
         if (!canvas) return null;
 
         // Scale down for faster encoding and lower API payload
-        const scale = Math.min(1, 480 / Math.max(video.videoWidth, video.videoHeight));
+        const scale = Math.min(1, 640 / Math.max(video.videoWidth, video.videoHeight));
         canvas.width = Math.floor(video.videoWidth * scale);
         canvas.height = Math.floor(video.videoHeight * scale);
 
@@ -75,7 +79,7 @@ export function useObjectDetection({
         if (!ctx) return null;
 
         ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
-        return canvas.toDataURL('image/jpeg', 0.7);
+        return canvas.toDataURL('image/jpeg', 0.85);
     }, [videoRef]);
 
     const runDetection = useCallback(async () => {
@@ -93,10 +97,12 @@ export function useObjectDetection({
         isRequestInFlightRef.current = true;
         lastCallTimeRef.current = now;
 
-        console.log('[SCAN] Sending frame to local backend /detect...');
+        scanAttemptsRef.current += 1;
+        setScanAttempts(scanAttemptsRef.current);
+        console.log(`[SCAN] Sending frame to /api/detect (attempt #${scanAttemptsRef.current})...`);
 
         try {
-            const res = await fetch('http://127.0.0.1:5001/detect', {
+            const res = await fetch('/api/detect', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ image: base64Image }),
@@ -105,18 +111,26 @@ export function useObjectDetection({
             if (!res.ok) {
                 const errData = await res.json().catch(() => ({}));
                 console.error('[SCAN] API error:', res.status, errData);
-                nextCallDelayMs.current = 6000;
+                consecutiveFailsRef.current += 1;
+                if (consecutiveFailsRef.current >= 3) {
+                    setScanError(`Detection backend error (${res.status})`);
+                }
+                nextCallDelayMs.current = 4000;
                 return;
             }
 
             const data = await res.json();
 
-            // Reset delay on success
-            nextCallDelayMs.current = 4000;
+            // Reset delay and error state on success
+            consecutiveFailsRef.current = 0;
+            setScanError(null);
+            nextCallDelayMs.current = 2000;
 
             const items: any[] = data.objects || [];
             if (items.length === 0) {
                 setDetectedObjects([]);
+                // Scan faster when nothing detected yet
+                nextCallDelayMs.current = 1500;
                 return;
             }
 
@@ -181,7 +195,11 @@ export function useObjectDetection({
 
         } catch (err) {
             console.error('[SCAN] Fetch error:', String(err));
-            nextCallDelayMs.current = 6000;
+            consecutiveFailsRef.current += 1;
+            if (consecutiveFailsRef.current >= 3) {
+                setScanError('Cannot reach detection service');
+            }
+            nextCallDelayMs.current = 4000;
         } finally {
             isRequestInFlightRef.current = false;
         }
@@ -190,10 +208,14 @@ export function useObjectDetection({
     useEffect(() => {
         if (!isNavigating) {
             setDetectedObjects([]);
+            setScanError(null);
+            setScanAttempts(0);
             isRequestInFlightRef.current = false;
-            nextCallDelayMs.current = 4000;
+            nextCallDelayMs.current = 1500;
             lastCallTimeRef.current = 0;
             distanceHistoryRef.current = {};
+            consecutiveFailsRef.current = 0;
+            scanAttemptsRef.current = 0;
             return;
         }
 
@@ -202,5 +224,5 @@ export function useObjectDetection({
         return () => clearInterval(id);
     }, [isNavigating, invokeIntervalMs, runDetection]);
 
-    return { detectedObjects };
+    return { detectedObjects, scanError, scanAttempts };
 }
