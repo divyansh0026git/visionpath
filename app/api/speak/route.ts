@@ -6,12 +6,6 @@ const execFileAsync = promisify(execFile);
 
 const PIPER_MODEL = "/home/kali/.local/share/piper-voices/en_US-amy-low.onnx";
 
-/**
- * POST /api/speak
- * Server-side TTS using Piper neural TTS (high quality).
- * Falls back to espeak-ng if Piper is unavailable.
- * Returns audio/wav that the browser can play directly.
- */
 export async function POST(req: NextRequest) {
     try {
         const { text } = await req.json();
@@ -25,14 +19,12 @@ export async function POST(req: NextRequest) {
         let wavBuffer: Buffer;
 
         try {
-            // Primary: Piper neural TTS (clear, natural voice)
             wavBuffer = await piperSpeak(safeText);
         } catch (e) {
-            // Fallback: espeak-ng (robotic but always available)
             console.warn("[/api/speak] Piper failed, falling back to espeak-ng:", e);
             const { stdout } = await execFileAsync(
                 "espeak-ng",
-                ["--stdout", "-v", "en-us", "-s", "185", "-a", "100", safeText],
+                ["--stdout", "-v", "en-us", "-s", "220", "-a", "100", safeText],
                 { encoding: "buffer", maxBuffer: 2 * 1024 * 1024, timeout: 10000 }
             );
             wavBuffer = stdout;
@@ -53,43 +45,38 @@ export async function POST(req: NextRequest) {
     }
 }
 
-/** Run Piper TTS: pipe text to stdin, get raw PCM from stdout, wrap as WAV */
+/** Spawn Piper, pipe text to stdin, collect raw PCM from stdout, wrap as WAV */
 function piperSpeak(text: string): Promise<Buffer> {
     return new Promise((resolve, reject) => {
         const proc = spawn("piper", [
             "--model", PIPER_MODEL,
             "--output-raw",
+            "--length-scale", "0.8",
         ], { stdio: ["pipe", "pipe", "pipe"] });
 
         const chunks: Buffer[] = [];
         let stderr = "";
 
-        proc.stdout.on("data", (chunk: Buffer) => chunks.push(chunk));
-        proc.stderr.on("data", (chunk: Buffer) => { stderr += chunk.toString(); });
+        proc.stdout!.on("data", (chunk: Buffer) => chunks.push(chunk));
+        proc.stderr!.on("data", (chunk: Buffer) => { stderr += chunk.toString(); });
 
         proc.on("close", (code) => {
-            if (code !== 0) {
-                return reject(new Error(`Piper exited ${code}: ${stderr}`));
-            }
+            if (code !== 0) return reject(new Error(`Piper exited ${code}: ${stderr}`));
             const pcm = Buffer.concat(chunks);
-            if (pcm.length === 0) {
-                return reject(new Error("Piper produced no audio"));
-            }
+            if (pcm.length === 0) return reject(new Error("Piper produced no audio"));
             resolve(wrapPCMInWav(pcm, 16000, 1, 16));
         });
 
         proc.on("error", reject);
 
-        // Timeout after 15s
         const timer = setTimeout(() => {
             proc.kill("SIGKILL");
             reject(new Error("Piper timed out"));
-        }, 15000);
+        }, 10000);
         proc.on("close", () => clearTimeout(timer));
 
-        // Feed text to piper's stdin
-        proc.stdin.write(text);
-        proc.stdin.end();
+        // Feed text and close stdin — piper processes and exits
+        proc.stdin!.end(text);
     });
 }
 

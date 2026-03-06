@@ -125,7 +125,7 @@ const BackgroundCameraInner = forwardRef<BackgroundCameraHandle, BackgroundCamer
     const { detectedObjects, scanError, scanAttempts } = useObjectDetection({
         isNavigating,
         videoRef,
-        invokeIntervalMs: 1000,
+        invokeIntervalMs: 250,
         onDescribeScene: (description: string) => {
             speak(`Scene: ${description}`, "polite");
         },
@@ -139,7 +139,7 @@ const BackgroundCameraInner = forwardRef<BackgroundCameraHandle, BackgroundCamer
                 }
             }
 
-            const confidentObjects = objects.filter(obj => obj.score > 0.65)
+            const confidentObjects = objects.filter(obj => obj.score > 0.5)
             if (confidentObjects.length === 0) return;
 
             const groups: Record<string, { count: number, closestSteps: number, latestObj: any }> = {}
@@ -167,13 +167,13 @@ const BackgroundCameraInner = forwardRef<BackgroundCameraHandle, BackgroundCamer
                 const isHazard = hazards.includes(objClass)
                 const lastSpoken = lastSpokenRef.current[objClass] || 0
 
-                // Cooldowns: generous gaps to avoid voice spam
-                let cooldownMs = 30000;
+                // Cooldowns: balanced for responsive guidance without spam
+                let cooldownMs = 15000;
                 if (isHazard) {
                     if (objClass === 'wall') {
-                        cooldownMs = closestSteps < 5 ? 12000 : 20000;
+                        cooldownMs = closestSteps < 5 ? 6000 : 12000;
                     } else {
-                        cooldownMs = closestSteps < 15 ? 15000 : 20000;
+                        cooldownMs = closestSteps < 10 ? 5000 : 10000;
                     }
                 }
 

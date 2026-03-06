@@ -44,7 +44,7 @@ export function useObjectDetection({
     // Request gate — only one API call in-flight at a time
     const isRequestInFlightRef = useRef(false);
     // How long to wait before next call (shorter initially, increases after success)
-    const nextCallDelayMs = useRef(1500);
+    const nextCallDelayMs = useRef(300);
     const lastCallTimeRef = useRef(0);
     const consecutiveFailsRef = useRef(0);
     const scanAttemptsRef = useRef(0);
@@ -53,6 +53,13 @@ export function useObjectDetection({
     const onDetectRef = useRef(onDetect);
     const onDescribeSceneRef = useRef(onDescribeScene);
     const distanceHistoryRef = useRef<Record<string, number[]>>({});
+
+    // Build backend URL dynamically so it works on localhost AND mobile/LAN
+    const backendUrlRef = useRef(
+        typeof window !== 'undefined'
+            ? `http://${window.location.hostname}:5001`
+            : 'http://127.0.0.1:5001'
+    );
 
     useEffect(() => { onDetectRef.current = onDetect; }, [onDetect]);
     useEffect(() => { onDescribeSceneRef.current = onDescribeScene; }, [onDescribeScene]);
@@ -71,7 +78,8 @@ export function useObjectDetection({
         if (!canvas) return null;
 
         // Scale down for faster encoding and lower API payload
-        const scale = Math.min(1, 640 / Math.max(video.videoWidth, video.videoHeight));
+        // 320px is optimal — matches backend resize target and lite_mobilenet_v2 input size
+        const scale = Math.min(1, 320 / Math.max(video.videoWidth, video.videoHeight));
         canvas.width = Math.floor(video.videoWidth * scale);
         canvas.height = Math.floor(video.videoHeight * scale);
 
@@ -79,7 +87,7 @@ export function useObjectDetection({
         if (!ctx) return null;
 
         ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
-        return canvas.toDataURL('image/jpeg', 0.85);
+        return canvas.toDataURL('image/jpeg', 0.5);
     }, [videoRef]);
 
     const runDetection = useCallback(async () => {
@@ -99,10 +107,11 @@ export function useObjectDetection({
 
         scanAttemptsRef.current += 1;
         setScanAttempts(scanAttemptsRef.current);
-        console.log(`[SCAN] Sending frame to /api/detect (attempt #${scanAttemptsRef.current})...`);
+        console.log(`[SCAN] Sending frame to backend (attempt #${scanAttemptsRef.current})...`);
 
         try {
-            const res = await fetch('/api/detect', {
+            // Call backend directly — bypass Next.js proxy for lower latency
+            const res = await fetch(`${backendUrlRef.current}/detect`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ image: base64Image }),
@@ -124,18 +133,24 @@ export function useObjectDetection({
             // Reset delay and error state on success
             consecutiveFailsRef.current = 0;
             setScanError(null);
-            nextCallDelayMs.current = 2000;
+            nextCallDelayMs.current = 500;
 
             const items: any[] = data.objects || [];
             if (items.length === 0) {
                 setDetectedObjects([]);
                 // Scan faster when nothing detected yet
-                nextCallDelayMs.current = 1500;
+                nextCallDelayMs.current = 300;
                 return;
             }
 
             const video = videoRef.current;
             if (!video) return;
+
+            // COCO-SSD returns bboxes in the capture-frame coordinate space (320px).
+            // Scale them back to original video coordinates for correct position
+            // detection and overlay rendering.
+            const captureScale = Math.min(1, 320 / Math.max(video.videoWidth, video.videoHeight));
+            const invScale = 1 / captureScale;
 
             // Estimate focal length from video dimensions assuming ~60° vertical FOV
             const vfovRad = (60 * Math.PI) / 180;
@@ -149,13 +164,13 @@ export function useObjectDetection({
                     // Skip lights/ceiling items
                     if (/light|lamp|bulb|ceiling|fixture/i.test(label)) return null;
 
-                    // bbox from COCO-SSD: [x, y, width, height] in pixels
-                    const xmin = item.bbox[0];
-                    const ymin = item.bbox[1];
-                    const bboxWidth = item.bbox[2];
-                    const bboxHeight = item.bbox[3];
+                    // bbox from COCO-SSD in capture-frame space → scale to video space
+                    const xmin = item.bbox[0] * invScale;
+                    const ymin = item.bbox[1] * invScale;
+                    const bboxWidth = item.bbox[2] * invScale;
+                    const bboxHeight = item.bbox[3] * invScale;
 
-                    // Estimate distance
+                    // Estimate distance (now both focalLength and bboxHeight are in video space)
                     let realHeight = 0.4;
                     for (const key in AVERAGE_HEIGHTS) {
                         if (label.includes(key)) { realHeight = AVERAGE_HEIGHTS[key]; break; }
@@ -170,6 +185,7 @@ export function useObjectDetection({
                     if (history.length > 3) history.shift();
                     const smoothedSteps = Math.round(history.reduce((a, b) => a + b, 0) / history.length);
 
+                    // Position uses video-space coordinates — thresholds now correct
                     const centerX = xmin + bboxWidth / 2;
                     let position: "left" | "right" | "center" = "center";
                     if (centerX < video.videoWidth / 3) position = "left";
@@ -211,7 +227,7 @@ export function useObjectDetection({
             setScanError(null);
             setScanAttempts(0);
             isRequestInFlightRef.current = false;
-            nextCallDelayMs.current = 1500;
+            nextCallDelayMs.current = 300;
             lastCallTimeRef.current = 0;
             distanceHistoryRef.current = {};
             consecutiveFailsRef.current = 0;

@@ -204,7 +204,7 @@ export function useVoiceEngine({ onCommand, continuous = true }: VoiceEngineOpti
       audio.onended = () => {
         URL.revokeObjectURL(url)
         fallbackAudioRef.current = null
-        setTimeout(() => { isSpeakingRef.current = false }, 500)
+        setTimeout(() => { isSpeakingRef.current = false }, 200)
       }
       audio.onerror = () => {
         URL.revokeObjectURL(url)
@@ -224,10 +224,10 @@ export function useVoiceEngine({ onCommand, continuous = true }: VoiceEngineOpti
 
     const now = Date.now()
 
-    // For polite speech: skip entirely if already speaking or spoke recently (10s cooldown)
+    // For polite speech: skip entirely if already speaking or spoke recently (6s cooldown)
     if (priority === "polite") {
       if (isSpeakingRef.current) return
-      if (now - lastSpeakTimeRef.current < 10000) return
+      if (now - lastSpeakTimeRef.current < 6000) return
     }
 
     // Assertive speech cancels current speech
@@ -260,7 +260,7 @@ export function useVoiceEngine({ onCommand, continuous = true }: VoiceEngineOpti
       // Small buffer to let room echoes die down
       setTimeout(() => {
         isSpeakingRef.current = false
-      }, 500)
+      }, 200)
     }
     utterance.onend = resetSpeaking
     utterance.onerror = (e) => {
@@ -270,8 +270,8 @@ export function useVoiceEngine({ onCommand, continuous = true }: VoiceEngineOpti
     }
 
     // Failsafe: Chrome sometimes doesn't fire onend for long utterances.
-    // Estimate ~80ms per character + 3s buffer. Reset speaking flag if stuck.
-    const estimatedMs = Math.max(4000, text.length * 80 + 3000)
+    // At 1.25x rate: ~64ms per character + 2s buffer. Reset speaking flag if stuck.
+    const estimatedMs = Math.max(3000, text.length * 64 + 2000)
     speakTimeoutRef.current = setTimeout(() => {
       if (isSpeakingRef.current) {
         isSpeakingRef.current = false
@@ -279,7 +279,7 @@ export function useVoiceEngine({ onCommand, continuous = true }: VoiceEngineOpti
       }
     }, estimatedMs)
 
-    utterance.rate = priority === "assertive" ? 1.1 : 0.95
+    utterance.rate = priority === "assertive" ? 1.35 : 1.25
     utterance.pitch = 1
     utterance.volume = 1
 
