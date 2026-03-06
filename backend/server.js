@@ -86,7 +86,8 @@ app.post("/detect", async (req, res) => {
     imageTensor = await decodeBase64Image(image);
 
     // Use tf.tidy for automatic tensor cleanup during inference
-    const predictions = await detector.detect(imageTensor, 20, 0.3);
+    // 30 max detections, 0.25 min score — wider coverage for everyday objects
+    const predictions = await detector.detect(imageTensor, 30, 0.25);
 
     // Format predictions to match the expected client-side schema
     const objects = predictions.map((pred) => ({

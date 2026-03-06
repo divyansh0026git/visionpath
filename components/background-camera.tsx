@@ -155,7 +155,21 @@ const BackgroundCameraInner = forwardRef<BackgroundCameraHandle, BackgroundCamer
             })
 
             const sortedGroups = Object.values(groups).sort((a, b) => a.closestSteps - b.closestSteps)
-            const hazards = ['car', 'truck', 'bus', 'motorcycle', 'wall']
+
+            // Import category sets from use-object-detection via dynamic check
+            const HAZARDS = new Set(['car', 'truck', 'bus', 'motorcycle', 'bicycle', 'train', 'boat', 'fire hydrant', 'horse', 'cow', 'elephant', 'bear'])
+            const TRIP_HAZARDS = new Set(['backpack', 'suitcase', 'skateboard', 'sports ball', 'frisbee', 'handbag', 'skis', 'snowboard', 'surfboard', 'bowl'])
+            const SHARP_OBJECTS = new Set(['knife', 'scissors', 'fork', 'baseball bat'])
+            const HOT_SURFACES = new Set(['oven', 'toaster', 'microwave'])
+            const LARGE_OBSTACLES = new Set(['bench', 'chair', 'couch', 'bed', 'dining table', 'toilet', 'refrigerator', 'sink', 'parking meter'])
+            const FRIENDLY_NAMES: Record<string, string> = {
+                'traffic light': 'traffic light', 'fire hydrant': 'fire hydrant',
+                'stop sign': 'stop sign', 'parking meter': 'parking meter',
+                'sports ball': 'ball', 'baseball bat': 'bat', 'baseball glove': 'glove',
+                'tennis racket': 'racket', 'wine glass': 'glass', 'hot dog': 'hot dog',
+                'potted plant': 'plant', 'dining table': 'table', 'cell phone': 'phone',
+                'teddy bear': 'teddy bear', 'hair drier': 'hair dryer',
+            }
 
             // Collect messages — speak ONCE with all objects batched together
             const parts: string[] = []
@@ -164,29 +178,44 @@ const BackgroundCameraInner = forwardRef<BackgroundCameraHandle, BackgroundCamer
             sortedGroups.forEach((group) => {
                 const { count, closestSteps, latestObj } = group
                 const objClass = latestObj.class
-                const isHazard = hazards.includes(objClass)
                 const lastSpoken = lastSpokenRef.current[objClass] || 0
 
-                // Cooldowns: balanced for responsive guidance without spam
-                let cooldownMs = 15000;
+                // Determine danger category for prefix and cooldown
+                const isHazard = HAZARDS.has(objClass)
+                const isTripHazard = TRIP_HAZARDS.has(objClass) && closestSteps < 8
+                const isSharp = SHARP_OBJECTS.has(objClass) && closestSteps < 6
+                const isHot = HOT_SURFACES.has(objClass) && closestSteps < 5
+                const isLargeObstacle = LARGE_OBSTACLES.has(objClass) && closestSteps < 10
+                const isDangerous = isHazard || isTripHazard || isSharp || isHot
+
+                // Cooldowns based on danger level and proximity
+                let cooldownMs = 15000
                 if (isHazard) {
-                    if (objClass === 'wall') {
-                        cooldownMs = closestSteps < 5 ? 6000 : 12000;
-                    } else {
-                        cooldownMs = closestSteps < 10 ? 5000 : 10000;
-                    }
+                    cooldownMs = closestSteps < 10 ? 5000 : 10000
+                } else if (isTripHazard || isSharp || isHot) {
+                    cooldownMs = 6000
+                } else if (isLargeObstacle) {
+                    cooldownMs = closestSteps < 5 ? 6000 : 12000
                 }
 
                 if (now - lastSpoken > cooldownMs) {
+                    const displayName = FRIENDLY_NAMES[objClass] || objClass
                     const distanceStr = closestSteps < 99 ? `${closestSteps} steps` : "ahead"
-                    const countStr = count > 1 && objClass !== 'wall' ? `${count} ${objClass}s` : objClass
-                    const hazardPrefix = isHazard ? "Caution, " : ""
-                    let positionStr = "ahead";
-                    if (latestObj.position === "left") positionStr = "on your left";
-                    if (latestObj.position === "right") positionStr = "on your right";
+                    const countStr = count > 1 ? `${count} ${displayName}s` : displayName
+                    let positionStr = "ahead"
+                    if (latestObj.position === "left") positionStr = "on your left"
+                    if (latestObj.position === "right") positionStr = "on your right"
 
-                    parts.push(`${hazardPrefix}${countStr} ${positionStr}, ${distanceStr}`)
-                    if (isHazard) hasHazard = true
+                    // Category-aware prefix
+                    let prefix = ""
+                    if (isHazard) prefix = "Caution, "
+                    else if (isTripHazard) prefix = "Watch your step, "
+                    else if (isSharp) prefix = "Careful, sharp object, "
+                    else if (isHot) prefix = "Careful, hot surface, "
+                    else if (isLargeObstacle) prefix = "Obstacle, "
+
+                    parts.push(`${prefix}${countStr} ${positionStr}, ${distanceStr}`)
+                    if (isDangerous) hasHazard = true
                     lastSpokenRef.current[objClass] = now
                 }
             })

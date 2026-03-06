@@ -17,18 +17,78 @@ interface UseObjectDetectionProps {
     onDescribeScene?: (description: string) => void;
 }
 
+// Complete height estimates for all 80 COCO-SSD object classes + useful aliases
 const AVERAGE_HEIGHTS: Record<string, number> = {
-    person: 1.7, man: 1.7, woman: 1.6, boy: 1.4, girl: 1.3, human: 1.6,
-    chair: 0.9, table: 0.8, desk: 0.8,
-    sofa: 0.9, couch: 0.9, bed: 0.6, door: 2.0, window: 1.5,
-    laptop: 0.2, computer: 0.4, monitor: 0.4, tv: 0.6, television: 0.6,
-    speaker: 0.3, socket: 0.1, 'power socket': 0.1, switch: 0.1,
-    phone: 0.15, 'cell phone': 0.15, mobile: 0.15, bottle: 0.25,
-    cup: 0.1, glass: 0.15, mug: 0.1,
-    car: 1.5, truck: 3.5, bus: 3.0, motorcycle: 1.2, bicycle: 1.0,
-    tree: 3.0, plant: 0.5, bag: 0.5, backpack: 0.5, box: 0.4,
-    cat: 0.3, dog: 0.6, wall: 2.5,
+    // People
+    person: 1.7,
+    // Vehicles (hazards)
+    bicycle: 1.0, car: 1.5, motorcycle: 1.2, airplane: 5.0, bus: 3.0,
+    train: 3.5, truck: 3.5, boat: 2.0,
+    // Street furniture & signals
+    'traffic light': 0.8, 'fire hydrant': 0.6, 'stop sign': 0.7,
+    'parking meter': 1.2, bench: 0.9,
+    // Animals
+    bird: 0.2, cat: 0.3, dog: 0.6, horse: 1.6, sheep: 0.7,
+    cow: 1.4, elephant: 3.0, bear: 1.5, zebra: 1.4, giraffe: 5.0,
+    // Accessories & bags
+    backpack: 0.5, umbrella: 1.0, handbag: 0.35, tie: 0.5, suitcase: 0.6,
+    // Sports
+    frisbee: 0.03, skis: 1.7, snowboard: 0.3, 'sports ball': 0.22,
+    kite: 0.6, 'baseball bat': 0.9, 'baseball glove': 0.25,
+    skateboard: 0.15, surfboard: 0.6, 'tennis racket': 0.7,
+    // Kitchen & dining
+    bottle: 0.25, 'wine glass': 0.2, cup: 0.1, fork: 0.2,
+    knife: 0.25, spoon: 0.2, bowl: 0.1,
+    // Food
+    banana: 0.2, apple: 0.08, sandwich: 0.08, orange: 0.08,
+    broccoli: 0.2, carrot: 0.2, 'hot dog': 0.05, pizza: 0.03,
+    donut: 0.05, cake: 0.15,
+    // Furniture (obstacles)
+    chair: 0.9, couch: 0.9, 'potted plant': 0.5, bed: 0.6,
+    'dining table': 0.8, toilet: 0.7,
+    // Electronics
+    tv: 0.6, laptop: 0.2, mouse: 0.04, remote: 0.2,
+    keyboard: 0.05, 'cell phone': 0.15,
+    // Appliances
+    microwave: 0.35, oven: 0.9, toaster: 0.25, sink: 0.4, refrigerator: 1.8,
+    // Household items
+    book: 0.25, clock: 0.3, vase: 0.3, scissors: 0.2,
+    'teddy bear': 0.4, 'hair drier': 0.25, toothbrush: 0.2,
 };
+
+// Natural speech names for COCO class labels
+const FRIENDLY_NAMES: Record<string, string> = {
+    'traffic light': 'traffic light', 'fire hydrant': 'fire hydrant',
+    'stop sign': 'stop sign', 'parking meter': 'parking meter',
+    'sports ball': 'ball', 'baseball bat': 'bat', 'baseball glove': 'glove',
+    'tennis racket': 'racket', 'wine glass': 'glass', 'hot dog': 'hot dog',
+    'potted plant': 'plant', 'dining table': 'table', 'cell phone': 'phone',
+    'teddy bear': 'teddy bear', 'hair drier': 'hair dryer',
+};
+
+// Objects that are dangerous and need urgent "Caution" alerts
+const HAZARDS = new Set([
+    'car', 'truck', 'bus', 'motorcycle', 'bicycle', 'train', 'boat',
+    'fire hydrant', 'horse', 'cow', 'elephant', 'bear',
+]);
+
+// Floor-level objects that are trip hazards
+const TRIP_HAZARDS = new Set([
+    'backpack', 'suitcase', 'skateboard', 'sports ball', 'frisbee',
+    'handbag', 'skis', 'snowboard', 'surfboard', 'bowl',
+]);
+
+// Sharp or dangerous household objects
+const SHARP_OBJECTS = new Set(['knife', 'scissors', 'fork', 'baseball bat']);
+
+// Hot appliances
+const HOT_SURFACES = new Set(['oven', 'toaster', 'microwave']);
+
+// Large furniture obstacles
+const LARGE_OBSTACLES = new Set([
+    'bench', 'chair', 'couch', 'bed', 'dining table', 'toilet',
+    'refrigerator', 'sink', 'parking meter',
+]);
 
 export function useObjectDetection({
     isNavigating,
