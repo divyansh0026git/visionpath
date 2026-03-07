@@ -1,0 +1,335 @@
+import { useState, useEffect, useRef, useCallback } from 'react';
+import { getBackendUrl } from '@/lib/backend-url';
+
+export interface DetectedObject {
+    class: string;
+    score: number;
+    bbox: [number, number, number, number];
+    position?: "left" | "right" | "center";
+    estimatedDistanceMeters?: number;
+    estimatedSteps?: number;
+    approaching?: boolean;     // true if getting closer over recent frames
+    approachSpeed?: number;    // steps decrease per second (positive = approaching)
+    recognizedName?: string;   // face recognition result (for persons)
+}
+
+interface UseObjectDetectionProps {
+    isNavigating: boolean;
+    videoRef: React.RefObject<HTMLVideoElement | null>;
+    invokeIntervalMs?: number;
+    onDetect?: (objects: DetectedObject[]) => void;
+    onDescribeScene?: (description: string) => void;
+}
+
+// Complete height estimates for all 80 COCO-SSD object classes + useful aliases
+const AVERAGE_HEIGHTS: Record<string, number> = {
+    // People
+    person: 1.7,
+    // Vehicles (hazards)
+    bicycle: 1.0, car: 1.5, motorcycle: 1.2, airplane: 5.0, bus: 3.0,
+    train: 3.5, truck: 3.5, boat: 2.0,
+    // Street furniture & signals
+    'traffic light': 0.8, 'fire hydrant': 0.6, 'stop sign': 0.7,
+    'parking meter': 1.2, bench: 0.9,
+    // Animals
+    bird: 0.2, cat: 0.3, dog: 0.6, horse: 1.6, sheep: 0.7,
+    cow: 1.4, elephant: 3.0, bear: 1.5, zebra: 1.4, giraffe: 5.0,
+    // Accessories & bags
+    backpack: 0.5, umbrella: 1.0, handbag: 0.35, tie: 0.5, suitcase: 0.6,
+    // Sports
+    frisbee: 0.03, skis: 1.7, snowboard: 0.3, 'sports ball': 0.22,
+    kite: 0.6, 'baseball bat': 0.9, 'baseball glove': 0.25,
+    skateboard: 0.15, surfboard: 0.6, 'tennis racket': 0.7,
+    // Kitchen & dining
+    bottle: 0.25, 'wine glass': 0.2, cup: 0.1, fork: 0.2,
+    knife: 0.25, spoon: 0.2, bowl: 0.1,
+    // Food
+    banana: 0.2, apple: 0.08, sandwich: 0.08, orange: 0.08,
+    broccoli: 0.2, carrot: 0.2, 'hot dog': 0.05, pizza: 0.03,
+    donut: 0.05, cake: 0.15,
+    // Furniture (obstacles)
+    chair: 0.9, couch: 0.9, 'potted plant': 0.5, bed: 0.6,
+    'dining table': 0.8, toilet: 0.7,
+    // Electronics
+    tv: 0.6, laptop: 0.2, mouse: 0.04, remote: 0.2,
+    keyboard: 0.05, 'cell phone': 0.15,
+    // Appliances
+    microwave: 0.35, oven: 0.9, toaster: 0.25, sink: 0.4, refrigerator: 1.8,
+    // Household items
+    book: 0.25, clock: 0.3, vase: 0.3, scissors: 0.2,
+    'teddy bear': 0.4, 'hair drier': 0.25, toothbrush: 0.2,
+    // Structural
+    wall: 2.5, door: 2.0, window: 1.5,
+};
+
+// Natural speech names for COCO class labels
+const FRIENDLY_NAMES: Record<string, string> = {
+    'traffic light': 'traffic light', 'fire hydrant': 'fire hydrant',
+    'stop sign': 'stop sign', 'parking meter': 'parking meter',
+    'sports ball': 'ball', 'baseball bat': 'bat', 'baseball glove': 'glove',
+    'tennis racket': 'racket', 'wine glass': 'glass', 'hot dog': 'hot dog',
+    'potted plant': 'plant', 'dining table': 'table', 'cell phone': 'phone',
+    'teddy bear': 'teddy bear', 'hair drier': 'hair dryer',
+};
+
+// Objects that are dangerous and need urgent "Caution" alerts
+const HAZARDS = new Set([
+    'car', 'truck', 'bus', 'motorcycle', 'bicycle', 'train', 'boat',
+    'fire hydrant', 'horse', 'cow', 'elephant', 'bear',
+]);
+
+// Floor-level objects that are trip hazards
+const TRIP_HAZARDS = new Set([
+    'backpack', 'suitcase', 'skateboard', 'sports ball', 'frisbee',
+    'handbag', 'skis', 'snowboard', 'surfboard', 'bowl', 'wall',
+]);
+
+// Sharp or dangerous household objects
+const SHARP_OBJECTS = new Set(['knife', 'scissors', 'fork', 'baseball bat']);
+
+// Hot appliances
+const HOT_SURFACES = new Set(['oven', 'toaster', 'microwave']);
+
+// Large furniture obstacles
+const LARGE_OBSTACLES = new Set([
+    'bench', 'chair', 'couch', 'bed', 'dining table', 'toilet',
+    'refrigerator', 'sink', 'parking meter', 'wall', 'door',
+]);
+
+export function useObjectDetection({
+    isNavigating,
+    videoRef,
+    invokeIntervalMs = 500,
+    onDetect,
+    onDescribeScene,
+}: UseObjectDetectionProps) {
+    const [detectedObjects, setDetectedObjects] = useState<DetectedObject[]>([]);
+    const [scanError, setScanError] = useState<string | null>(null);
+    const [scanAttempts, setScanAttempts] = useState(0);
+
+    // Request gate — only one API call in-flight at a time
+    const isRequestInFlightRef = useRef(false);
+    // How long to wait before next call (shorter = faster scanning)
+    const nextCallDelayMs = useRef(100);
+    const lastCallTimeRef = useRef(0);
+    const consecutiveFailsRef = useRef(0);
+    const scanAttemptsRef = useRef(0);
+
+    const canvasRef = useRef<HTMLCanvasElement | null>(null);
+    const onDetectRef = useRef(onDetect);
+    const onDescribeSceneRef = useRef(onDescribeScene);
+    const distanceHistoryRef = useRef<Record<string, number[]>>({});
+    // Motion tracker: per-object-position history for approach/recede detection
+    const motionTrackerRef = useRef<Record<string, { steps: number[], timestamps: number[] }>>({});
+
+    // Build backend URL dynamically so it works on localhost AND mobile/LAN
+    const backendUrlRef = useRef(getBackendUrl());
+
+    useEffect(() => { onDetectRef.current = onDetect; }, [onDetect]);
+    useEffect(() => { onDescribeSceneRef.current = onDescribeScene; }, [onDescribeScene]);
+
+    useEffect(() => {
+        if (!canvasRef.current) {
+            canvasRef.current = document.createElement('canvas');
+        }
+    }, []);
+
+    const captureFrameBase64 = useCallback((): string | null => {
+        const video = videoRef.current;
+        if (!video || video.readyState < 2 || video.videoWidth === 0) return null;
+
+        const canvas = canvasRef.current;
+        if (!canvas) return null;
+
+        // Scale down for faster encoding and lower API payload
+        // 320px is optimal — matches backend resize target and lite_mobilenet_v2 input size
+        const scale = Math.min(1, 320 / Math.max(video.videoWidth, video.videoHeight));
+        canvas.width = Math.floor(video.videoWidth * scale);
+        canvas.height = Math.floor(video.videoHeight * scale);
+
+        const ctx = canvas.getContext('2d', { willReadFrequently: true });
+        if (!ctx) return null;
+
+        ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+        return canvas.toDataURL('image/jpeg', 0.5);
+    }, [videoRef]);
+
+    const runDetection = useCallback(async () => {
+        if (!isNavigating || isRequestInFlightRef.current) return;
+
+        const now = Date.now();
+        if (now - lastCallTimeRef.current < nextCallDelayMs.current) return;
+
+        const base64Image = captureFrameBase64();
+        if (!base64Image) {
+            console.log('[SCAN] Frame not ready yet, skipping...');
+            return;
+        }
+
+        isRequestInFlightRef.current = true;
+        lastCallTimeRef.current = now;
+
+        scanAttemptsRef.current += 1;
+        setScanAttempts(scanAttemptsRef.current);
+        console.log(`[SCAN] Sending frame to backend (attempt #${scanAttemptsRef.current})...`);
+
+        try {
+            // Call backend directly — bypass Next.js proxy for lower latency
+            const res = await fetch(`${backendUrlRef.current}/detect`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ image: base64Image }),
+            });
+
+            if (!res.ok) {
+                const errData = await res.json().catch(() => ({}));
+                console.error('[SCAN] API error:', res.status, errData);
+                consecutiveFailsRef.current += 1;
+                if (consecutiveFailsRef.current >= 3) {
+                    setScanError(`Detection backend error (${res.status})`);
+                }
+                nextCallDelayMs.current = 1500;
+                return;
+            }
+
+            const data = await res.json();
+
+            // Reset delay and error state on success — keep scanning fast
+            consecutiveFailsRef.current = 0;
+            setScanError(null);
+            nextCallDelayMs.current = 150;
+
+            const items: any[] = data.objects || [];
+            if (items.length === 0) {
+                setDetectedObjects([]);
+                // Scan faster when nothing detected yet
+                nextCallDelayMs.current = 100;
+                return;
+            }
+
+            const video = videoRef.current;
+            if (!video) return;
+
+            // COCO-SSD returns bboxes in the capture-frame coordinate space (320px).
+            // Scale them back to original video coordinates for correct position
+            // detection and overlay rendering.
+            const captureScale = Math.min(1, 320 / Math.max(video.videoWidth, video.videoHeight));
+            const invScale = 1 / captureScale;
+
+            // Estimate focal length from video dimensions assuming ~60° vertical FOV
+            const vfovRad = (60 * Math.PI) / 180;
+            const focalLength = video.videoHeight / (2 * Math.tan(vfovRad / 2));
+
+            const enhanced: DetectedObject[] = items
+                .filter((item: any) => item && item.class && Array.isArray(item.bbox) && item.bbox.length === 4)
+                .map((item: any) => {
+                    const label = String(item.class).toLowerCase();
+
+                    // Skip lights/ceiling items
+                    if (/light|lamp|bulb|ceiling|fixture/i.test(label)) return null;
+
+                    // bbox from COCO-SSD in capture-frame space → scale to video space
+                    const xmin = item.bbox[0] * invScale;
+                    const ymin = item.bbox[1] * invScale;
+                    const bboxWidth = item.bbox[2] * invScale;
+                    const bboxHeight = item.bbox[3] * invScale;
+
+                    // Estimate distance (now both focalLength and bboxHeight are in video space)
+                    let realHeight = 0.4;
+                    for (const key in AVERAGE_HEIGHTS) {
+                        if (label.includes(key)) { realHeight = AVERAGE_HEIGHTS[key]; break; }
+                    }
+
+                    const distanceM = bboxHeight > 0 ? (realHeight * focalLength) / bboxHeight : 99;
+                    const rawSteps = Math.min(30, Math.max(1, Math.round(distanceM / 0.762)));
+
+                    if (!distanceHistoryRef.current[label]) distanceHistoryRef.current[label] = [];
+                    const history = distanceHistoryRef.current[label];
+                    history.push(rawSteps);
+                    if (history.length > 3) history.shift();
+                    const smoothedSteps = Math.round(history.reduce((a, b) => a + b, 0) / history.length);
+
+                    // Position uses video-space coordinates — thresholds now correct
+                    const centerX = xmin + bboxWidth / 2;
+                    let position: "left" | "right" | "center" = "center";
+                    if (centerX < video.videoWidth / 3) position = "left";
+                    else if (centerX > video.videoWidth * (2 / 3)) position = "right";
+
+                    // Motion tracking: track per class+position for approach detection
+                    const trackKey = `${label}_${position}`;
+                    const tracker = motionTrackerRef.current;
+                    if (!tracker[trackKey]) tracker[trackKey] = { steps: [], timestamps: [] };
+                    const track = tracker[trackKey];
+                    track.steps.push(smoothedSteps);
+                    track.timestamps.push(Date.now());
+                    if (track.steps.length > 8) {
+                        track.steps.shift();
+                        track.timestamps.shift();
+                    }
+
+                    let approaching = false;
+                    let approachSpeed = 0;
+                    if (track.steps.length >= 3) {
+                        const oldest = track.steps[0];
+                        const newest = track.steps[track.steps.length - 1];
+                        const timeDiffS = (track.timestamps[track.timestamps.length - 1] - track.timestamps[0]) / 1000;
+                        if (timeDiffS > 0) {
+                            approachSpeed = (oldest - newest) / timeDiffS; // positive = approaching
+                            approaching = approachSpeed > 0.5;
+                        }
+                    }
+
+                    return {
+                        class: label,
+                        score: item.score ?? 0.85,
+                        bbox: [xmin, ymin, bboxWidth, bboxHeight] as [number, number, number, number],
+                        position,
+                        estimatedDistanceMeters: smoothedSteps * 0.76,
+                        estimatedSteps: smoothedSteps,
+                        approaching,
+                        approachSpeed: parseFloat(approachSpeed.toFixed(2)),
+                    };
+                })
+                .filter(Boolean) as DetectedObject[];
+
+            console.log(`[SCAN] Detected ${enhanced.length} objects`);
+            setDetectedObjects(enhanced);
+
+            if (onDetectRef.current && enhanced.length > 0) {
+                onDetectRef.current(enhanced);
+            }
+
+        } catch (err) {
+            console.error('[SCAN] Fetch error:', String(err));
+            consecutiveFailsRef.current += 1;
+            if (consecutiveFailsRef.current >= 3) {
+                setScanError('Cannot reach detection service');
+            }
+            nextCallDelayMs.current = 1500;
+        } finally {
+            isRequestInFlightRef.current = false;
+        }
+    }, [isNavigating, captureFrameBase64, videoRef]);
+
+    useEffect(() => {
+        if (!isNavigating) {
+            setDetectedObjects([]);
+            setScanError(null);
+            setScanAttempts(0);
+            isRequestInFlightRef.current = false;
+            nextCallDelayMs.current = 100;
+            lastCallTimeRef.current = 0;
+            distanceHistoryRef.current = {};
+            motionTrackerRef.current = {};
+            consecutiveFailsRef.current = 0;
+            scanAttemptsRef.current = 0;
+            return;
+        }
+
+        // Poll rapidly; the time-gating inside runDetection controls actual API call frequency
+        const id = setInterval(runDetection, invokeIntervalMs);
+        return () => clearInterval(id);
+    }, [isNavigating, invokeIntervalMs, runDetection]);
+
+    return { detectedObjects, scanError, scanAttempts };
+}
