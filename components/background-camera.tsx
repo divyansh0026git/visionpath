@@ -133,16 +133,16 @@ const BackgroundCameraInner = forwardRef<BackgroundCameraHandle, BackgroundCamer
     const { detectedObjects, scanError, scanAttempts } = useObjectDetection({
         isNavigating,
         videoRef,
-        invokeIntervalMs: lowPowerMode ? 1000 : 250,
+        invokeIntervalMs: lowPowerMode ? 800 : 150,
         onDescribeScene: (description: string) => {
             speak(`Scene: ${description}`, "polite");
         },
         onDetect: (objects: any[]) => {
             const now = Date.now()
 
-            // Prune stale entries older than 60 seconds to prevent memory growth
+            // Prune stale entries older than 30 seconds to prevent memory growth
             for (const key in lastSpokenRef.current) {
-                if (now - lastSpokenRef.current[key] > 60000) {
+                if (now - lastSpokenRef.current[key] > 30000) {
                     delete lastSpokenRef.current[key]
                 }
             }
@@ -170,7 +170,7 @@ const BackgroundCameraInner = forwardRef<BackgroundCameraHandle, BackgroundCamer
             )
             if (dangerVehicle) {
                 const lastDanger = lastSpokenRef.current['__danger_vehicle'] || 0
-                if (now - lastDanger > 3000) {
+                if (now - lastDanger > 2000) {
                     const vname = FRIENDLY_NAMES[dangerVehicle.class] || dangerVehicle.class
                     // Urgent vibration pattern for danger
                     if (typeof navigator !== 'undefined' && navigator.vibrate) {
@@ -186,12 +186,12 @@ const BackgroundCameraInner = forwardRef<BackgroundCameraHandle, BackgroundCamer
             }
             const personObjects = confidentObjects.filter(o => o.class === 'person')
             if (personObjects.length >= 5) {
-                if (now - (lastSpokenRef.current['__crowd'] || 0) > 15000) {
+                if (now - (lastSpokenRef.current['__crowd'] || 0) > 10000) {
                     speak(`Large crowd ahead, about ${personObjects.length} people.`, "assertive")
                     lastSpokenRef.current['__crowd'] = now
                 }
             } else if (personObjects.length >= 3) {
-                if (now - (lastSpokenRef.current['__crowd'] || 0) > 15000) {
+                if (now - (lastSpokenRef.current['__crowd'] || 0) > 10000) {
                     speak(`Group of ${personObjects.length} people ahead.`, "polite")
                     lastSpokenRef.current['__crowd'] = now
                 }
@@ -200,14 +200,14 @@ const BackgroundCameraInner = forwardRef<BackgroundCameraHandle, BackgroundCamer
             // === Traffic detection ===
             const vehicleObjects = confidentObjects.filter(o => VEHICLES.has(o.class))
             if (vehicleObjects.length >= 3) {
-                if (now - (lastSpokenRef.current['__traffic'] || 0) > 20000) {
+                if (now - (lastSpokenRef.current['__traffic'] || 0) > 12000) {
                     speak(`Traffic ahead, ${vehicleObjects.length} vehicles.`, "assertive")
                     lastSpokenRef.current['__traffic'] = now
                 }
             }
 
             // === Face recognition (periodic, non-blocking — disabled in low power mode) ===
-            if (!lowPowerMode && personObjects.length > 0 && now - faceRecogCooldownRef.current > 4000) {
+            if (!lowPowerMode && personObjects.length > 0 && now - faceRecogCooldownRef.current > 3000) {
                 faceRecogCooldownRef.current = now
                 // Capture frame for face recognition
                 const video = videoRef.current
@@ -235,7 +235,7 @@ const BackgroundCameraInner = forwardRef<BackgroundCameraHandle, BackgroundCamer
                                 // Announce recognized persons
                                 names.forEach((name: string) => {
                                     const lastAnnounced = lastSpokenRef.current[`__face_${name}`] || 0
-                                    if (now - lastAnnounced > 15000) {
+                                    if (now - lastAnnounced > 10000) {
                                         speak(`${name} is here.`, "polite")
                                         lastSpokenRef.current[`__face_${name}`] = Date.now()
                                     }
@@ -253,7 +253,7 @@ const BackgroundCameraInner = forwardRef<BackgroundCameraHandle, BackgroundCamer
             personObjects.forEach(person => {
                 if (person.approaching && (person.approachSpeed || 0) > 1 && (person.estimatedSteps || 99) < 8) {
                     const lastApproach = lastSpokenRef.current['__person_approach'] || 0
-                    if (now - lastApproach > 8000) {
+                    if (now - lastApproach > 5000) {
                         const name = recognizedNamesRef.current.length > 0
                             ? recognizedNamesRef.current[0]
                             : 'Someone'
@@ -301,15 +301,15 @@ const BackgroundCameraInner = forwardRef<BackgroundCameraHandle, BackgroundCamer
                 // Fast-approaching vehicle gets shorter cooldown
                 const isApproachingFast = VEHICLES.has(objClass) && latestObj.approaching && (latestObj.approachSpeed || 0) > 1.5
 
-                let cooldownMs = 15000
+                let cooldownMs = 8000
                 if (isApproachingFast) {
-                    cooldownMs = 3000
+                    cooldownMs = 2000
                 } else if (isHazard) {
-                    cooldownMs = closestSteps < 10 ? 5000 : 10000
+                    cooldownMs = closestSteps < 10 ? 3000 : 5000
                 } else if (isTripHazard || isSharp || isHot) {
-                    cooldownMs = 6000
+                    cooldownMs = 4000
                 } else if (isLargeObstacle) {
-                    cooldownMs = closestSteps < 5 ? 6000 : 12000
+                    cooldownMs = closestSteps < 5 ? 4000 : 8000
                 }
 
                 if (now - lastSpoken > cooldownMs) {

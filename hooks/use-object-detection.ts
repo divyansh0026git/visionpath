@@ -107,8 +107,8 @@ export function useObjectDetection({
 
     // Request gate — only one API call in-flight at a time
     const isRequestInFlightRef = useRef(false);
-    // How long to wait before next call (shorter initially, increases after success)
-    const nextCallDelayMs = useRef(300);
+    // How long to wait before next call (shorter = faster scanning)
+    const nextCallDelayMs = useRef(100);
     const lastCallTimeRef = useRef(0);
     const consecutiveFailsRef = useRef(0);
     const scanAttemptsRef = useRef(0);
@@ -186,22 +186,22 @@ export function useObjectDetection({
                 if (consecutiveFailsRef.current >= 3) {
                     setScanError(`Detection backend error (${res.status})`);
                 }
-                nextCallDelayMs.current = 4000;
+                nextCallDelayMs.current = 1500;
                 return;
             }
 
             const data = await res.json();
 
-            // Reset delay and error state on success
+            // Reset delay and error state on success — keep scanning fast
             consecutiveFailsRef.current = 0;
             setScanError(null);
-            nextCallDelayMs.current = 500;
+            nextCallDelayMs.current = 150;
 
             const items: any[] = data.objects || [];
             if (items.length === 0) {
                 setDetectedObjects([]);
                 // Scan faster when nothing detected yet
-                nextCallDelayMs.current = 300;
+                nextCallDelayMs.current = 100;
                 return;
             }
 
@@ -303,7 +303,7 @@ export function useObjectDetection({
             if (consecutiveFailsRef.current >= 3) {
                 setScanError('Cannot reach detection service');
             }
-            nextCallDelayMs.current = 4000;
+            nextCallDelayMs.current = 1500;
         } finally {
             isRequestInFlightRef.current = false;
         }
@@ -315,7 +315,7 @@ export function useObjectDetection({
             setScanError(null);
             setScanAttempts(0);
             isRequestInFlightRef.current = false;
-            nextCallDelayMs.current = 300;
+            nextCallDelayMs.current = 100;
             lastCallTimeRef.current = 0;
             distanceHistoryRef.current = {};
             motionTrackerRef.current = {};

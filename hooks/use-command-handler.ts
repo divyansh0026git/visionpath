@@ -226,13 +226,22 @@ export function useCommandHandler(
         speak("Navigation started. Continuous scanning is active. Follow audio guidance.", "assertive")
         setStatusMessage("Navigating and scanning environment")
 
-      // 11. Face registration — "add name John" or "remember John"
-      } else if (hasPhrase("add name") || hasPhrase("remember face") || hasPhrase("remember name")) {
-        const nameMatch = cmd.match(/(?:add name|remember face|remember name)\s+(.+)/)
-        if (nameMatch && nameMatch[1] && nameMatch[1].trim().length > 0) {
-          const personName = nameMatch[1].trim()
+      // 11. Face registration — "add name John" / "remember John" / "register John"
+      // Speech recognition often produces "add names", "and name", "at name" etc.
+      } else if (/\b(add\s*a?\s*names?|remember\s*(face|name)|register\s*(face|name)?)\b/.test(cmd)) {
+        const nameMatch = cmd.match(/(?:add\s*a?\s*names?|remember\s*(?:face|name)|register\s*(?:face|name)?)\s+(.+)/i)
+        // Also try: just grab everything after the trigger word if first regex fails
+        const fallbackMatch = !nameMatch ? cmd.match(/(?:add|register|remember)\s+(?:a\s+)?(?:names?|face)?\s*(.+)/i) : null
+        const match = nameMatch || fallbackMatch
+        if (match && match[1] && match[1].trim().length > 0) {
+          // Clean extracted name — remove trailing filler words
+          const personName = match[1].trim().replace(/\b(please|now|for me)\b/gi, '').trim()
+          if (!personName) {
+            speak("Say add name followed by the person's name. For example, add name John.", "polite")
+            return
+          }
           if (!cameraRef.current) {
-            speak("Camera not active. Start navigation first.", "assertive")
+            speak("Camera not active. Say start first, then try add name again.", "assertive")
             return
           }
           const frame = cameraRef.current.captureFrame()
@@ -240,7 +249,7 @@ export function useCommandHandler(
             speak("Failed to capture image. Try again.", "assertive")
             return
           }
-          speak(`Looking for a face to register as ${personName}...`, "polite")
+          speak(`Registering face as ${personName}...`, "polite")
           fetch(`${getBackendUrl()}/face/register`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
@@ -255,7 +264,7 @@ export function useCommandHandler(
               }
             })
             .catch(() => {
-              speak("Error registering face. Please try again.", "assertive")
+              speak("Error registering face. Check that the backend is running.", "assertive")
             })
         } else {
           speak("Say add name followed by the person's name. For example, add name John.", "polite")
@@ -361,7 +370,7 @@ export function useCommandHandler(
       // 16. Help (lowest priority — catches remaining "help" not captured above)
       } else if (hasWord("help") || hasWord("commands")) {
         speak(
-          "Commands: allow, start, stop, show feed, call help, emergency, go back, where am I, read currency, describe scene, add name followed by a person's name, save route, navigate to, list routes, delete route.",
+          "Commands: allow, start, stop, show feed, call help, emergency, go back, where am I, read currency, describe scene, add name or register followed by a person's name, save route, navigate to, list routes, delete route.",
           "polite"
         )
       }

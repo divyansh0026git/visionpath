@@ -252,10 +252,10 @@ export function useVoiceEngine({ onCommand, continuous = true }: VoiceEngineOpti
 
     const now = Date.now()
 
-    // For polite speech: skip entirely if already speaking or spoke recently (6s cooldown)
+    // For polite speech: skip entirely if already speaking or spoke recently (2.5s cooldown)
     if (priority === "polite") {
       if (isSpeakingRef.current) return
-      if (now - lastSpeakTimeRef.current < 6000) return
+      if (now - lastSpeakTimeRef.current < 2500) return
     }
 
     // Assertive speech cancels current speech
