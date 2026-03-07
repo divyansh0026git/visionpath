@@ -7,6 +7,12 @@ interface VoiceEngineOptions {
   continuous?: boolean
 }
 
+interface SpeechQueueItem {
+  text: string
+  priority: "polite" | "assertive"
+  pan?: number
+}
+
 export function useVoiceEngine({ onCommand, continuous = true }: VoiceEngineOptions = {}) {
   const [isListening, setIsListening] = useState(false)
   const [transcript, setTranscript] = useState("")
@@ -17,12 +23,15 @@ export function useVoiceEngine({ onCommand, continuous = true }: VoiceEngineOpti
   // Ref to track the latest isListening state inside async closures (avoids stale closure bug)
   const isListeningRef = useRef(false)
   const isSpeakingRef = useRef(false)
-  const pendingUtteranceRef = useRef<SpeechSynthesisUtterance | null>(null)
-  const useFallbackTTSRef = useRef(false)
-  const fallbackAudioRef = useRef<HTMLAudioElement | null>(null)
-  const speakViaServerRef = useRef<((text: string) => void) | null>(null)
+  const currentAudioRef = useRef<HTMLAudioElement | null>(null)
+  const currentSourceRef = useRef<AudioBufferSourceNode | null>(null)
   // Web Audio API context for spatial audio panning
   const audioContextRef = useRef<AudioContext | null>(null)
+
+  // Speech queue for sequential playback without overlap
+  const speechQueueRef = useRef<SpeechQueueItem[]>([])
+  const isProcessingQueueRef = useRef(false)
+  const lastSpeakTimeRef = useRef(0)
 
   // Ref to always have the latest onCommand callback (fixes stale closure in onresult)
   const onCommandRef = useRef(onCommand)
@@ -33,64 +42,17 @@ export function useVoiceEngine({ onCommand, continuous = true }: VoiceEngineOpti
     isListeningRef.current = isListening
   }, [isListening])
 
-  // ---- TTS voice warmup ----
-  // Chrome/Linux loads voices asynchronously. speechSynthesis.speak() silently fails
-  // if called before voices are loaded. Queue critical messages until ready.
-  useEffect(() => {
-    if (typeof window === 'undefined' || !window.speechSynthesis) {
-      console.warn('[VOICE] speechSynthesis API not available in this browser')
-      return
-    }
-
-    const handleVoicesReady = () => {
-      const voices = window.speechSynthesis.getVoices()
-      if (voices.length > 0) {
-        console.log(`[VOICE] TTS ready — ${voices.length} voice(s) available`)
-        // Play any queued utterance that was waiting for voices to load
-        if (pendingUtteranceRef.current) {
-          const utterance = pendingUtteranceRef.current
-          pendingUtteranceRef.current = null
-          window.speechSynthesis.speak(utterance)
-        }
-      }
-    }
-
-    // Trigger voice loading and check immediately (Firefox loads synchronously)
-    window.speechSynthesis.getVoices()
-    handleVoicesReady()
-
-    window.speechSynthesis.addEventListener('voiceschanged', handleVoicesReady)
-
-    // If voices never load, switch to server-side TTS fallback
-    const warnTimer = setTimeout(() => {
-      if (window.speechSynthesis.getVoices().length === 0) {
-        console.warn('[VOICE] No browser TTS voices after 5s — switching to server-side TTS fallback')
-        useFallbackTTSRef.current = true
-        // Play any queued message via fallback
-        if (pendingUtteranceRef.current) {
-          const pendingText = pendingUtteranceRef.current.text
-          pendingUtteranceRef.current = null
-          speakViaServerRef.current?.(pendingText)
-        }
-      }
-    }, 5000)
-
-    return () => {
-      window.speechSynthesis.removeEventListener('voiceschanged', handleVoicesReady)
-      clearTimeout(warnTimer)
-    }
-  }, [])
-
-  // ---- Speech Recognition setup ----
+  // ---- Speech Recognition setup (continuous, robust) ----
   useEffect(() => {
     const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition
     if (SpeechRecognition) {
       console.log('[VOICE] SpeechRecognition API available')
       setIsSupported(true)
       const recognition = new SpeechRecognition()
-      recognition.continuous = continuous
+      recognition.continuous = true
       recognition.interimResults = true
       recognition.lang = "en-US"
+      recognition.maxAlternatives = 1
 
       recognition.onresult = (event: SpeechRecognitionEvent) => {
         if (isSpeakingRef.current) return // Ignore input if TTS is currently active
@@ -115,14 +77,8 @@ export function useVoiceEngine({ onCommand, continuous = true }: VoiceEngineOpti
 
       recognition.onerror = (event: SpeechRecognitionErrorEvent) => {
         console.warn('[VOICE] Recognition error:', event.error)
-        // On "no-speech" or "audio-capture" errors, try to restart rather than stopping
-        if (event.error === "no-speech" || event.error === "audio-capture") {
-          // Will be restarted by onend
-          return
-        }
-        // Network errors are often transient — allow onend to auto-restart
-        if (event.error === "network") {
-          console.warn('[VOICE] Network error — will retry. If persistent, restart the browser.')
+        // Transient errors — onend will auto-restart
+        if (event.error === "no-speech" || event.error === "audio-capture" || event.error === "network" || event.error === "aborted") {
           return
         }
         if (event.error === "not-allowed") {
@@ -133,13 +89,16 @@ export function useVoiceEngine({ onCommand, continuous = true }: VoiceEngineOpti
       }
 
       recognition.onend = () => {
-        // Use ref (not state) to avoid stale closure — this ensures continuous restarts work
-        if (continuous && isListeningRef.current) {
-          try {
-            recognition.start()
-          } catch {
-            // Already started — ignore
-          }
+        // Immediately restart if we should be listening — minimal gap for continuous detection
+        if (isListeningRef.current) {
+          setTimeout(() => {
+            if (!isListeningRef.current) return
+            try {
+              recognition.start()
+            } catch {
+              // Already started — ignore
+            }
+          }, 50) // 50ms restart gap — near-instant continuous detection
         } else {
           setIsListening(false)
           isListeningRef.current = false
@@ -156,7 +115,7 @@ export function useVoiceEngine({ onCommand, continuous = true }: VoiceEngineOpti
       if (transcriptTimerRef.current) clearTimeout(transcriptTimerRef.current)
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [continuous])
+  }, [])
 
   const startListening = useCallback(() => {
     if (!recognitionRef.current) {
@@ -168,9 +127,8 @@ export function useVoiceEngine({ onCommand, continuous = true }: VoiceEngineOpti
       recognitionRef.current.start()
       setIsListening(true)
       isListeningRef.current = true
-      console.log('[VOICE] Mic listening started')
+      console.log('[VOICE] Mic listening started (continuous mode)')
     } catch (e: any) {
-      // InvalidStateError = already started (harmless). Any other error is real.
       if (e?.name !== 'InvalidStateError') {
         console.error('[VOICE] Failed to start recognition:', e)
       }
@@ -185,142 +143,132 @@ export function useVoiceEngine({ onCommand, continuous = true }: VoiceEngineOpti
     }
   }, [])
 
-  const speakTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null)
-  const lastSpeakTimeRef = useRef(0)
-
-  // Server-side TTS fallback via /api/speak (Piper neural TTS)
-  const speakViaServer = useCallback(async (text: string, pan?: number) => {
-    try {
-      isSpeakingRef.current = true
-      console.log('[VOICE] Server TTS:', text.substring(0, 50))
-      const res = await fetch('/api/speak', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ text }),
-      })
-      if (!res.ok) throw new Error(`Server TTS failed: ${res.status}`)
-      const blob = await res.blob()
-      const url = URL.createObjectURL(blob)
-
-      // If spatial pan requested and Web Audio API is available, route through panner
-      if (pan !== undefined && pan !== 0 && typeof AudioContext !== 'undefined') {
-        try {
-          if (!audioContextRef.current) audioContextRef.current = new AudioContext()
-          const ctx = audioContextRef.current
-          if (ctx.state === 'suspended') await ctx.resume()
-          const arrayBuffer = await blob.arrayBuffer()
-          const audioBuffer = await ctx.decodeAudioData(arrayBuffer)
-          const source = ctx.createBufferSource()
-          source.buffer = audioBuffer
-          const panner = ctx.createStereoPanner()
-          panner.pan.value = Math.max(-1, Math.min(1, pan))
-          source.connect(panner)
-          panner.connect(ctx.destination)
-          source.onended = () => {
-            URL.revokeObjectURL(url)
-            setTimeout(() => { isSpeakingRef.current = false }, 200)
-          }
-          source.start()
-          return
-        } catch (e) {
-          console.warn('[VOICE] Spatial audio fallback to normal:', e)
-        }
+  // ---- Cancel current audio playback ----
+  const cancelCurrentAudio = useCallback(() => {
+    if (currentSourceRef.current) {
+      try { currentSourceRef.current.stop() } catch {}
+      currentSourceRef.current = null
+    }
+    if (currentAudioRef.current) {
+      currentAudioRef.current.pause()
+      if (currentAudioRef.current.src) {
+        URL.revokeObjectURL(currentAudioRef.current.src)
       }
-
-      const audio = new Audio(url)
-      fallbackAudioRef.current = audio
-      audio.onended = () => {
-        URL.revokeObjectURL(url)
-        fallbackAudioRef.current = null
-        setTimeout(() => { isSpeakingRef.current = false }, 200)
-      }
-      audio.onerror = () => {
-        URL.revokeObjectURL(url)
-        fallbackAudioRef.current = null
-        isSpeakingRef.current = false
-      }
-      await audio.play()
-    } catch (e) {
-      console.error('[VOICE] Server TTS error:', e)
-      isSpeakingRef.current = false
+      currentAudioRef.current = null
     }
   }, [])
-  speakViaServerRef.current = speakViaServer
 
+  // ---- Play a single TTS item via server-side Piper ----
+  const playServerTTS = useCallback(async (text: string, pan?: number): Promise<void> => {
+    const res = await fetch('/api/speak', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ text }),
+    })
+    if (!res.ok) throw new Error(`Server TTS failed: ${res.status}`)
+    const blob = await res.blob()
+    const url = URL.createObjectURL(blob)
+
+    return new Promise<void>((resolve, reject) => {
+      // Spatial audio panning via Web Audio API
+      if (pan !== undefined && pan !== 0 && typeof AudioContext !== 'undefined') {
+        (async () => {
+          try {
+            if (!audioContextRef.current) audioContextRef.current = new AudioContext()
+            const ctx = audioContextRef.current
+            if (ctx.state === 'suspended') await ctx.resume()
+            const arrayBuffer = await blob.arrayBuffer()
+            const audioBuffer = await ctx.decodeAudioData(arrayBuffer)
+            const source = ctx.createBufferSource()
+            source.buffer = audioBuffer
+            currentSourceRef.current = source
+            const panner = ctx.createStereoPanner()
+            panner.pan.value = Math.max(-1, Math.min(1, pan))
+            source.connect(panner)
+            panner.connect(ctx.destination)
+            source.onended = () => {
+              URL.revokeObjectURL(url)
+              currentSourceRef.current = null
+              resolve()
+            }
+            source.start()
+          } catch (e) {
+            console.warn('[VOICE] Spatial audio fallback to normal:', e)
+            // Fall through to normal <audio> playback
+            playViaAudioElement(url, resolve, reject)
+          }
+        })()
+        return
+      }
+
+      playViaAudioElement(url, resolve, reject)
+    })
+
+    function playViaAudioElement(audioUrl: string, resolve: () => void, reject: (e: Error) => void) {
+      const audio = new Audio(audioUrl)
+      currentAudioRef.current = audio
+      audio.onended = () => {
+        URL.revokeObjectURL(audioUrl)
+        currentAudioRef.current = null
+        resolve()
+      }
+      audio.onerror = () => {
+        URL.revokeObjectURL(audioUrl)
+        currentAudioRef.current = null
+        reject(new Error('Audio playback error'))
+      }
+      audio.play().catch(reject)
+    }
+  }, [])
+
+  // ---- Process speech queue sequentially ----
+  const processQueue = useCallback(async () => {
+    if (isProcessingQueueRef.current) return
+    isProcessingQueueRef.current = true
+    isSpeakingRef.current = true
+
+    while (speechQueueRef.current.length > 0) {
+      const item = speechQueueRef.current.shift()!
+      try {
+        console.log('[VOICE] TTS playing:', item.text.substring(0, 60))
+        await playServerTTS(item.text, item.pan)
+      } catch (e) {
+        console.error('[VOICE] TTS playback error:', e)
+      }
+    }
+
+    isProcessingQueueRef.current = false
+    // Small buffer to let room echoes die down before re-enabling mic input
+    setTimeout(() => {
+      isSpeakingRef.current = false
+    }, 150)
+  }, [playServerTTS])
+
+  // ---- Main speak function — always uses server-side Piper TTS ----
   const speak = useCallback((text: string, priority: "polite" | "assertive" = "polite", pan?: number) => {
     if (typeof window === 'undefined') return
 
     const now = Date.now()
 
-    // For polite speech: skip entirely if already speaking or spoke recently (2.5s cooldown)
+    // For polite speech: skip if already speaking or spoke recently (1.5s cooldown)
     if (priority === "polite") {
-      if (isSpeakingRef.current) return
-      if (now - lastSpeakTimeRef.current < 2500) return
+      if (isSpeakingRef.current && speechQueueRef.current.length >= 2) return
+      if (now - lastSpeakTimeRef.current < 1500) return
     }
 
-    // Assertive speech cancels current speech
+    // Assertive speech: cancel current playback and clear polite items from queue
     if (priority === "assertive") {
-      if (fallbackAudioRef.current) {
-        fallbackAudioRef.current.pause()
-        fallbackAudioRef.current = null
-      }
-      if (window.speechSynthesis) window.speechSynthesis.cancel()
-    }
-
-    if (speakTimeoutRef.current) clearTimeout(speakTimeoutRef.current)
-    lastSpeakTimeRef.current = now
-
-    // Use server-side fallback when browser has no voices
-    if (useFallbackTTSRef.current || !window.speechSynthesis) {
-      speakViaServer(text, pan)
-      return
-    }
-
-    const utterance = new SpeechSynthesisUtterance(text)
-
-    // Block the microphone from processing this utterance
-    utterance.onstart = () => {
-      isSpeakingRef.current = true
-    }
-    const resetSpeaking = () => {
-      if (speakTimeoutRef.current) clearTimeout(speakTimeoutRef.current)
-      speakTimeoutRef.current = null
-      // Small buffer to let room echoes die down
-      setTimeout(() => {
-        isSpeakingRef.current = false
-      }, 200)
-    }
-    utterance.onend = resetSpeaking
-    utterance.onerror = (e) => {
-      // "interrupted" fires when cancel() is called — keep isSpeaking true for the replacement utterance
-      if (e.error === 'interrupted') return
+      cancelCurrentAudio()
+      // Keep only other assertive items in queue, drop polite ones
+      speechQueueRef.current = speechQueueRef.current.filter(i => i.priority === "assertive")
+      isProcessingQueueRef.current = false
       isSpeakingRef.current = false
     }
 
-    // Failsafe: Chrome sometimes doesn't fire onend for long utterances.
-    // At 1.25x rate: ~64ms per character + 2s buffer. Reset speaking flag if stuck.
-    const estimatedMs = Math.max(3000, text.length * 64 + 2000)
-    speakTimeoutRef.current = setTimeout(() => {
-      if (isSpeakingRef.current) {
-        isSpeakingRef.current = false
-        speakTimeoutRef.current = null
-      }
-    }, estimatedMs)
-
-    utterance.rate = priority === "assertive" ? 1.35 : 1.25
-    utterance.pitch = 1
-    utterance.volume = 1
-
-    // If voices haven't loaded yet, use server fallback
-    if (window.speechSynthesis.getVoices().length === 0) {
-      console.log('[VOICE] No browser voices — using server TTS for:', text.substring(0, 50))
-      useFallbackTTSRef.current = true
-      speakViaServer(text, pan)
-      return
-    }
-
-    window.speechSynthesis.speak(utterance)
-  }, [speakViaServer])
+    lastSpeakTimeRef.current = now
+    speechQueueRef.current.push({ text, priority, pan })
+    processQueue()
+  }, [cancelCurrentAudio, processQueue])
 
   return {
     isListening,

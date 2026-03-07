@@ -4,7 +4,8 @@ import { promisify } from "util";
 
 const execFileAsync = promisify(execFile);
 
-const PIPER_MODEL = process.env.PIPER_MODEL_PATH || `${process.env.HOME || '/home/kali'}/.local/share/piper-voices/en_US-amy-low.onnx`;
+const PIPER_MODEL = process.env.PIPER_MODEL_PATH || `${process.env.HOME || '/home/kali'}/.local/share/piper-voices/en_US-amy-medium.onnx`;
+const PIPER_SAMPLE_RATE = 22050;  // medium model uses 22050 Hz
 
 export async function POST(req: NextRequest) {
     try {
@@ -64,7 +65,7 @@ function piperSpeak(text: string): Promise<Buffer> {
             if (code !== 0) return reject(new Error(`Piper exited ${code}: ${stderr}`));
             const pcm = Buffer.concat(chunks);
             if (pcm.length === 0) return reject(new Error("Piper produced no audio"));
-            resolve(wrapPCMInWav(pcm, 16000, 1, 16));
+            resolve(wrapPCMInWav(pcm, PIPER_SAMPLE_RATE, 1, 16));
         });
 
         proc.on("error", reject);
