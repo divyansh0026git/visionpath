@@ -1,5 +1,8 @@
 import { NextRequest, NextResponse } from "next/server";
 
+export const dynamic = "force-dynamic";
+export const maxDuration = 60;
+
 const BACKEND_URL = process.env.BACKEND_URL || "http://127.0.0.1:5001";  // server-side only
 
 export async function POST(req: NextRequest) {

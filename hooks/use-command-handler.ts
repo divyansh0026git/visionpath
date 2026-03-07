@@ -320,6 +320,34 @@ export function useCommandHandler(
           speak("Say add name followed by the person's name. For example, add name John.", "polite")
         }
 
+        // 11b. Face removal — "remove name John" / "forget John" / "delete John"
+      } else if (/\b(?:remove\s*(?:name|face)?|forget|delete\s*(?:name|face)?)\b/i.test(cmd) && !hasPhrase("route")) {
+        // Exclude "route" to avoid clashing with "delete route" commands
+        const nameMatch = cmd.match(/(?:(?:remove|delete)\s*(?:name|face)?|forget)\s+(.+)/i)
+        if (nameMatch && nameMatch[1] && nameMatch[1].trim().length > 0) {
+          const personName = nameMatch[1].trim().replace(/\b(please|now|for me)\b/gi, '').trim()
+
+          speak(`Removing ${personName} from memory...`, "polite")
+          fetch(`${getBackendUrl()}/face/remove`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ name: personName }),
+          })
+            .then(r => r.json())
+            .then(data => {
+              if (data.success) {
+                speak(`${personName} has been removed from memory.`, "assertive")
+              } else {
+                speak(data.message || `Could not find ${personName} in memory.`, "assertive")
+              }
+            })
+            .catch(() => {
+              speak("Error removing face. Check that the backend is running.", "assertive")
+            })
+        } else {
+          speak("Say remove name followed by the person's name. For example, remove name John.", "polite")
+        }
+
         // 12. Save route — "save route kitchen" / "save path bedroom"
       } else if (hasPhrase("save route") || hasPhrase("save path") || hasPhrase("remember route") || hasPhrase("remember path")) {
         const routeMatch = cmd.match(/(?:save route|save path|remember route|remember path)\s+(.+)/)
@@ -417,10 +445,51 @@ export function useCommandHandler(
           speak("Say delete route followed by the route name.", "polite")
         }
 
-        // 16. Help (lowest priority — catches remaining "help" not captured above)
+        // 16. Weather
+      } else if (hasWord("weather") || hasPhrase("is it raining") || hasPhrase("temperature")) {
+        speak("Checking the weather...", "polite")
+        if (typeof navigator !== "undefined" && "geolocation" in navigator) {
+          navigator.geolocation.getCurrentPosition(
+            (pos) => {
+              const { latitude, longitude } = pos.coords
+              fetch(`https://api.open-meteo.com/v1/forecast?latitude=${latitude}&longitude=${longitude}&current_weather=true`)
+                .then(res => res.json())
+                .then(data => {
+                  if (data && data.current_weather) {
+                    const temp = Math.round(data.current_weather.temperature)
+                    // WMO Weather interpretation codes
+                    const code = data.current_weather.weathercode
+                    let desc = "clear"
+                    if (code >= 1 && code <= 3) desc = "partly cloudy"
+                    else if (code >= 45 && code <= 48) desc = "foggy"
+                    else if (code >= 51 && code <= 67) desc = "raining"
+                    else if (code >= 71 && code <= 77) desc = "snowing"
+                    else if (code >= 95) desc = "stormy"
+
+                    speak(`It is currently ${temp} degrees and ${desc} outside.`, "assertive")
+                  } else {
+                    speak("I couldn't retrieve the weather data.", "assertive")
+                  }
+                })
+                .catch(err => {
+                  console.error("[WEATHER]", err)
+                  speak("Error fetching weather information.", "assertive")
+                })
+            },
+            (err) => {
+              console.error("[WEATHER LOCATION]", err)
+              speak("I need location permissions to check the weather.", "assertive")
+            },
+            { timeout: 10000, maximumAge: 60000 }
+          )
+        } else {
+          speak("Weather features are not supported on this device.", "assertive")
+        }
+
+        // 17. Help (lowest priority — catches remaining "help" not captured above)
       } else if (hasWord("help") || hasWord("commands")) {
         speak(
-          "Commands: start, stop, show feed, call help, set emergency number, emergency, go back, where am I, read text, read currency, describe scene, add name, save route, navigate to, list routes, delete route.",
+          "Commands: start, stop, show feed, call help, set emergency number, emergency, go back, where am I, read text, read currency, describe scene, weather, add name, save route, navigate to, list routes, delete route.",
           "polite"
         )
       }

@@ -232,6 +232,35 @@ app.post("/face/register", async (req, res) => {
 });
 
 /**
+ * POST /face/remove
+ * Remove a registered person's face by name.
+ * Accepts: { name: "Person Name" }
+ */
+app.post("/face/remove", (req, res) => {
+  if (!faceModelsLoaded) {
+    return res.status(503).json({ success: false, message: "Face recognition not available yet" });
+  }
+
+  const { name } = req.body;
+  if (!name || typeof name !== "string") {
+    return res.status(400).json({ success: false, message: "Missing name" });
+  }
+
+  const trimmedName = name.trim();
+  const initialLength = knownFaces.length;
+
+  knownFaces = knownFaces.filter(f => f.name.toLowerCase() !== trimmedName.toLowerCase());
+
+  if (knownFaces.length < initialLength) {
+    saveKnownFaces();
+    console.log(`[BACKEND] Removed face: ${trimmedName}`);
+    return res.json({ success: true, message: `Removed ${trimmedName} from memory` });
+  } else {
+    return res.json({ success: false, message: `Could not find ${trimmedName} in memory` });
+  }
+});
+
+/**
  * POST /face/recognize
  * Recognize faces in an image against stored descriptors.
  * Accepts: { image: "<base64>" }

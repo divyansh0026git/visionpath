@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
-import { getBackendUrl } from '@/lib/backend-url';
+
 
 export interface DetectedObject {
     class: string;
@@ -122,8 +122,7 @@ export function useObjectDetection({
     // Motion tracker: per-object-position history for approach/recede detection
     const motionTrackerRef = useRef<Record<string, { steps: number[], timestamps: number[] }>>({});
 
-    // Build backend URL dynamically so it works on localhost AND mobile/LAN
-    const backendUrlRef = useRef(getBackendUrl());
+
 
     useEffect(() => { onDetectRef.current = onDetect; }, [onDetect]);
     useEffect(() => { onDescribeSceneRef.current = onDescribeScene; }, [onDescribeScene]);
@@ -174,12 +173,19 @@ export function useObjectDetection({
         console.log(`[SCAN] Sending frame to backend (attempt #${scanAttemptsRef.current})...`);
 
         try {
-            // Call backend directly — bypass Next.js proxy for lower latency
-            const res = await fetch(`${backendUrlRef.current}/detect`, {
+            // Call via Next.js proxy cache-busted to reliably handle CORS and Safari Keep-Alive drops
+            const controller = new AbortController();
+            const timeoutId = setTimeout(() => controller.abort(), 12000);
+
+            const res = await fetch(`/api/scan-frame?t=${Date.now()}`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ image: base64Image }),
+                cache: 'no-store',
+                keepalive: false,
+                signal: controller.signal
             });
+            clearTimeout(timeoutId);
 
             if (!res.ok) {
                 const errData = await res.json().catch(() => ({}));
@@ -299,11 +305,19 @@ export function useObjectDetection({
                 onDetectRef.current(enhanced);
             }
 
-        } catch (err) {
-            console.error('[SCAN] Fetch error:', String(err));
+        } catch (err: any) {
+            const errorString = String(err?.message || err);
+            console.error('[SCAN] Fetch error:', errorString);
             consecutiveFailsRef.current += 1;
+
             if (consecutiveFailsRef.current >= 3) {
-                setScanError('Cannot reach detection service');
+                if (errorString.includes('Failed to fetch') || errorString.includes('Load failed')) {
+                    setScanError(`Network Error (${errorString}): Cannot reach API. If on Safari, check ad-blockers or allow the site data.`);
+                } else if (errorString.includes('timeout') || errorString.includes('AbortError')) {
+                    setScanError('Scan timed out. Service is taking too long.');
+                } else {
+                    setScanError(`Detection error: ${errorString.substring(0, 30)}`);
+                }
             }
             nextCallDelayMs.current = 1500;
         } finally {
